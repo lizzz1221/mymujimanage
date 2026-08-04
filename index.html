@@ -1225,12 +1225,16 @@ function renderBoxSetupTab(g){
     for(const p of boxes){
       const open=!!_bpOpen[p.id];
       const info=calcBoxes(g,p);
-      let statLine=`<span>已成 <strong>${info.complete+(info.bindComplete||0)}</strong> 配</span>`;
-      const nextBox=info.boxes.find(b=>b.some(s=>!s.buyer));
+      let statLine;
+      if(p.kind==='blind'&&p.blindOpened){
+        const actualQty=getBlindProductConfirmedOrders(g,p).reduce((sum,o)=>sum+o.qty,0);
+        statLine=`<span class="badge b-amber">全盲抽・已拆配</span><span>實際成立 <strong>${actualQty}</strong> 件</span>`;
+      }else statLine=`<span>${p.kind==='blind'?'<span class="badge b-amber">全盲抽・未拆配</span> ':''}已成 <strong>${info.complete+(info.bindComplete||0)}</strong> 配</span>`;
+      const nextBox=p.kind==='blind'&&p.blindOpened?null:info.boxes.find(b=>b.some(s=>!s.buyer));
       if(nextBox){
         const missing=nextBox.filter(s=>!s.buyer).map(s=>s.item);
         statLine+=`<span style="color:#a32d2d">下一配餘：${missing.map(esc).join('、')}</span>`;
-      } else {
+      } else if(!(p.kind==='blind'&&p.blindOpened)){
         statLine+=`<span style="color:#3b6d11">無缺口</span>`;
       }
       h+=`<div class="box-product">
@@ -1305,6 +1309,18 @@ function bpDetailHtml(g,p){
   }
 
   const info=calcBoxes(g,p);
+  if(p.kind==='blind'&&p.blindOpened){
+    const actual=getBlindProductConfirmedOrders(g,p);
+    h+=`<div style="margin:8px 0 12px;padding:10px;background:#fff9df;border:1px solid #ead48e;border-radius:6px">
+      <div style="font-weight:bold;margin-bottom:7px">實際拆配結果</div>
+      <div style="overflow-x:auto"><table><thead><tr><th>款式</th><th>實際開出</th><th>喊單成立</th><th>依順位取得</th></tr></thead><tbody>
+      ${p.contents.map(item=>{
+        const rows=actual.filter(o=>o.item===item),qty=rows.reduce((sum,o)=>sum+o.qty,0);
+        return `<tr><td>${esc(item)}</td><td>${Math.max(0,parseInt((p.blindCounts||{})[item])||0)}</td><td>${qty}</td><td class="muted">${rows.map(o=>`${esc(o.nick)}×${o.qty}`).join('、')||'-'}</td></tr>`;
+      }).join('')}</tbody></table></div>
+      <p class="muted" style="font-size:11px;margin-top:7px">下方保留拆配前的成團配單，供核對原結果與順位。</p>
+    </div>`;
+  }
   h+=`${bpPriceMode(p)==='adjust'?`<div style="font-size:12px;margin-bottom:6px;color:#534ab7">均價 ${p.avgPrice||0} · 各款合計 ${p.contents.reduce((s,c)=>(p.itemPrices?s+(p.itemPrices[c]||0):s),0)}</div>`:''}
     <div style="display:flex;gap:16px;font-size:13px;margin-bottom:10px;flex-wrap:wrap">
       <span>已成 <strong>${info.complete}</strong> 配</span>
@@ -1341,7 +1357,8 @@ function bpDetailHtml(g,p){
       ${p.contents.map(c=>`<th>${esc(c)}${bind[c]?` <span class="badge b-purple" style="font-size:9px">綁${bind[c]}</span>`:''}</th>`).join('')}<th>狀態</th><th></th></tr></thead><tbody>`;
     for(let i=0;i<showN;i++){
       const box=info.boxes[i];
-      h+=`<tr><td style="white-space:nowrap;font-weight:bold">第 ${i+1} 配</td>`;
+      const priceChanged=Object.keys(p.rowPrices||{}).some(key=>key.startsWith(i+'|||'));
+      h+=`<tr><td style="white-space:nowrap;font-weight:bold">第 ${i+1} 配${priceChanged?' *':''}</td>`;
       const hasEmpty=box.some(s=>!s.buyer);
       const hasBinder=box.some(s=>s.buyer&&!s.buyer.bind&&bind[s.item]);
       for(const slot of box){
@@ -1353,13 +1370,46 @@ function bpDetailHtml(g,p){
       }
       const sb=box.status==='成團'?'b-green':box.status==='含綁成團'?'b-purple':'b-amber';
       h+=`<td><span class="badge ${sb}">${box.status}</span></td>`;
-      h+=`<td>${hasEmpty&&hasBinder?`<button class="bs bp" onclick="event.stopPropagation();showBindModal(${g.id},${p.id},${i})">綁</button>`:''}</td></tr>`;
+      h+=`<td><div style="display:flex;gap:4px;justify-content:flex-end">${hasEmpty&&hasBinder?`<button class="bs bp" onclick="event.stopPropagation();showBindModal(${g.id},${p.id},${i})">綁</button>`:''}${RO?'':`<button class="bs" onclick="event.stopPropagation();showBoxRowPriceModal(${g.id},${p.id},${i})">編輯價格</button>`}</div></td></tr>`;
     }
     if(showN<info.boxesNeeded)h+=`<tr><td colspan="${p.contents.length+3}" class="muted" style="text-align:center">…其餘 ${info.boxesNeeded-showN} 配未顯示</td></tr>`;
     h+=`</tbody></table></div>`;
   }
   if(p.img)h+='</div></div>';
   return h;
+}
+
+function showBoxRowPriceModal(gid,pid,boxIdx){
+  const g=getG(gid),p=(g?.boxProducts||[]).find(x=>x.id===pid);if(!p)return;
+  const rows=p.contents.map(item=>{
+    const key=boxIdx+'|||'+item;
+    const custom=Object.prototype.hasOwnProperty.call(p.rowPrices||{},key);
+    const value=custom?p.rowPrices[key]:(bpFinalItemPrice(p,item)??0);
+    return `<div class="form-group"><label>${esc(item)}${custom?' *':''}</label><input class="rowPriceInput" data-item="${esc(item)}" type="number" min="0" step="any" value="${value}"></div>`;
+  }).join('');
+  openModal(`<h3>第 ${boxIdx+1} 配價格</h3>
+    <p class="muted" style="margin:6px 0 10px">可自由調整每一款價格，不限制合計金額。儲存後此配會標示 *。</p>
+    <div class="form-row">${rows}</div>
+    <div class="btn-row"><button class="bp" onclick="saveBoxRowPrices(${gid},${pid},${boxIdx})">儲存</button>
+      <button class="bd" onclick="resetBoxRowPrices(${gid},${pid},${boxIdx})">重置此配</button>
+      <button onclick="closeModal()">取消</button></div>`);
+}
+function saveBoxRowPrices(gid,pid,boxIdx){
+  const values=[...document.querySelectorAll('.rowPriceInput')].map(input=>({item:input.dataset.item,price:Math.max(0,parseFloat(input.value)||0)}));
+  upG(gid,g=>{
+    const p=(g.boxProducts||[]).find(x=>x.id===pid);if(!p)return;
+    if(!p.rowPrices)p.rowPrices={};
+    for(const row of values)p.rowPrices[boxIdx+'|||'+row.item]=row.price;
+  });
+  closeModal();render();
+}
+function resetBoxRowPrices(gid,pid,boxIdx){
+  if(!confirm(`重置第 ${boxIdx+1} 配的全部價格？`))return;
+  upG(gid,g=>{
+    const p=(g.boxProducts||[]).find(x=>x.id===pid);if(!p||!p.rowPrices)return;
+    for(const key of Object.keys(p.rowPrices))if(key.startsWith(boxIdx+'|||'))delete p.rowPrices[key];
+  });
+  closeModal();render();
 }
 
 function hasUnconfirmedOrders(g,p,nick){
@@ -1510,6 +1560,7 @@ function stabilizeConfirmedBoxes(g){
     }
     if(changed)info=calcBoxes(g,p);
     freezeConfirmedBoxes(g,p);
+    if(p.kind==='blind'&&p.blindOpened)stabilizeBlindAllocation(g,p);
   }
 }
 
@@ -1712,12 +1763,16 @@ function renderPriorityTab(g){
 
 function renderBuyersTab(g){
   const st=S();const byB={};
+  const blindAdjust=getBlindAdjustmentMap(g);
   for(const o of getConfirmedOrders(g)){
     if(!byB[o.nick])byB[o.nick]={items:new Set(),orders:[],qty:0,amt:0,sur:0};
     byB[o.nick].items.add(o.item);byB[o.nick].orders.push(o);byB[o.nick].qty+=o.qty;byB[o.nick].amt+=o.qty*effPrice(g,o);
     // 二補（國際運費均攤）＝商品設定的每件二補 × 數量，與商品金額分開統計
     const surBp=(g.boxProducts||[]).find(p=>orderMatches(p,o)&&p.contents.includes(o.item));
     byB[o.nick].sur+=(surBp&&surBp.surcharge?surBp.surcharge:0)*o.qty;
+  }
+  for(const nick of Object.keys(blindAdjust)){
+    if(!byB[nick])byB[nick]={items:new Set(),orders:[],qty:0,amt:0,sur:0};
   }
   const hasSur=Object.values(byB).some(d=>d.sur>0);
   const hiddenStats=new Set(g.hiddenStatsNicks||[]);
@@ -1740,7 +1795,7 @@ function renderBuyersTab(g){
     }
     h+=`<div style="margin-bottom:14px;padding:10px;background:#fef7fa;border-radius:8px">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;gap:8px;flex-wrap:wrap">
-        <strong>${esc(nick)}</strong><span style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><span class="muted">${d.qty} 件 · $${d.amt.toLocaleString()}${d.sur>0?` · 二補 $${d.sur.toLocaleString()}`:''}</span>${RO?'':`<button class="bs bg" style="color:#a32d2d" onclick="hideBuyerStat(${g.id},'${encodeURIComponent(nick)}')">隱藏</button>`}</span></div>
+        <strong>${esc(nick)}</strong><span style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><span class="muted">${d.qty} 件 · $${d.amt.toLocaleString()}${d.sur>0?` · 二補 $${d.sur.toLocaleString()}`:''}</span>${blindAdjust[nick]>0?`<span class="badge b-amber">需補款 $${blindAdjust[nick].toLocaleString()}</span>`:blindAdjust[nick]<0?`<span class="badge b-green">需退款 $${Math.abs(blindAdjust[nick]).toLocaleString()}</span>`:Object.prototype.hasOwnProperty.call(blindAdjust,nick)?'<span class="badge b-gray">拆配差額 $0</span>':''}${RO?'':`<button class="bs bg" style="color:#a32d2d" onclick="hideBuyerStat(${g.id},'${encodeURIComponent(nick)}')">隱藏</button>`}</span></div>
       ${buyerLine}
       <div style="overflow-x:auto"><table><thead><tr><th>商品</th><th>${esc(st.fieldQty)}</th><th>${esc(st.fieldPrice)}</th><th>小計</th>${hasSur?'<th>二補</th>':''}<th>${esc(st.fieldNote)}</th><th>到貨狀況</th><th>出貨</th></tr></thead><tbody>`;
     const groupArrived=['已到貨','已結團'].includes(g.status);
@@ -2235,7 +2290,7 @@ function addOrderRow(){
   if(hasBps){
     itemField=`
     <div class="form-group" style="flex:1;min-width:0"><label>商品</label>
-      <select class="moBp" style="width:100%"><option value="">— 選擇商品 —</option>${bps.map(p=>`<option value="${p.id}" ${p.kind==='single'?'style="color:#0b7285;font-weight:bold"':''}>${esc(p.name)}${p.kind==='single'?'（單領）':''}</option>`).join('')}</select></div>
+      <select class="moBp" style="width:100%"><option value="">— 選擇商品 —</option>${bps.map(p=>`<option value="${p.id}" ${p.kind==='single'?'style="color:#0b7285;font-weight:bold"':''}>${esc(p.name)}${p.kind==='single'?'（單領）':p.kind==='blind'?'（全盲抽）':''}</option>`).join('')}</select></div>
     <div class="form-group" style="flex:1;min-width:0"><label>款式</label>
       <select class="moI" style="width:100%" disabled><option value="">— 先選商品 —</option></select></div>`;
   } else {
@@ -2466,9 +2521,12 @@ function delItem(gid,iid){
 }
 
 function toggleBpKind(){
-  const isSingle=document.querySelector('input[name=bpKind]:checked')?.value==='single';
+  const kind=document.querySelector('input[name=bpKind]:checked')?.value||'box';
+  const isSingle=kind==='single';
   const boxOnly=$('#bpBoxOnly');if(boxOnly)boxOnly.style.display=isSingle?'none':'block';
   const singleOnly=$('#bpSingleOnly');if(singleOnly)singleOnly.style.display=isSingle?'block':'none';
+  const blindOnly=$('#bpBlindOnly');if(blindOnly)blindOnly.style.display=kind==='blind'?'block':'none';
+  refreshBlindCountInputs();
 }
 function refreshBindInputs(existing){
   const box=$('#bindInputs');if(!box)return;
@@ -2510,6 +2568,7 @@ function syncEditBpContents(){
   const hidden=$('#bpC'),existing=[...document.querySelectorAll('.bpExistingContent')];
   if(!hidden||!existing.length)return;
   const priceValues=[...document.querySelectorAll('#priceInputs input[id^="ip_"]')].map(el=>el.value);
+  const blindValues=[...document.querySelectorAll('#blindCountInputs .blindCount')].map(el=>el.value);
   const bindValues=[...document.querySelectorAll('#bindInputs .bindCb')].map(cb=>{
     const n=document.querySelector(`#bindInputs .bindN[data-c="${CSS.escape(cb.dataset.c)}"]`);
     return {checked:cb.checked,count:parseInt(n?.value)||1};
@@ -2519,6 +2578,8 @@ function syncEditBpContents(){
   hidden.value=names.concat(appended).join('\n');
   if(currentBpPriceMode()!=='average')refreshPriceInputs();
   refreshBindInputs();
+  refreshBlindCountInputs();
+  document.querySelectorAll('#blindCountInputs .blindCount').forEach((el,i)=>{if(blindValues[i]!=null)el.value=blindValues[i];});
   document.querySelectorAll('#priceInputs input[id^="ip_"]').forEach((el,i)=>{if(priceValues[i]!=null)el.value=priceValues[i];});
   document.querySelectorAll('#bindInputs .bindCb').forEach((cb,i)=>{
     const old=bindValues[i];if(!old)return;cb.checked=old.checked;
@@ -2526,7 +2587,28 @@ function syncEditBpContents(){
   });
   updatePriceSummary();
 }
-function refreshBpModalInputs(){if(currentBpPriceMode()!=='average')refreshPriceInputs();refreshBindInputs();}
+function refreshBlindCountInputs(existing){
+  const box=$('#blindCountInputs');if(!box)return;
+  const current={};
+  box.querySelectorAll('.blindCount').forEach(input=>{current[input.dataset.c]=Math.max(0,parseInt(input.value)||0);});
+  const values={...(existing||{}),...current};
+  const ta=$('#bpC');if(!ta)return;
+  const contents=ta.value.trim().split(/[\n\/,，]/).map(s=>s.trim()).filter(Boolean);
+  box.innerHTML=contents.length?contents.map(c=>'<div class="form-group"><label>'+esc(c)+'</label><input type="number" min="0" class="blindCount" data-c="'+esc(c)+'" value="'+(values[c]||0)+'"></div>').join(''):'<p class="muted" style="font-size:11px">請先輸入款式</p>';
+  toggleBlindOpenedInputs();
+}
+function toggleBlindOpenedInputs(){
+  const enabled=!!$('#bpBlindOpened')?.checked;
+  document.querySelectorAll('#blindCountInputs .blindCount').forEach(input=>{input.disabled=!enabled;});
+}
+function collectBlindCounts(contents){
+  const counts={};
+  document.querySelectorAll('#blindCountInputs .blindCount').forEach(input=>{
+    if(contents.includes(input.dataset.c))counts[input.dataset.c]=Math.max(0,parseInt(input.value)||0);
+  });
+  return counts;
+}
+function refreshBpModalInputs(){if(currentBpPriceMode()!=='average')refreshPriceInputs();refreshBindInputs();refreshBlindCountInputs();}
 let _bpImg=null; // null=未變更, ''=已移除, dataURL=新圖
 function imgFileToData(f,cb,max,quality){
   if(!f)return;
@@ -2619,11 +2701,13 @@ function bpSortField(cur){
 }
 function showAddBoxProductModal(gid,defaultKind){
   const isSingle=defaultKind==='single';
+  const isBlind=defaultKind==='blind';
   _bpImg=null;
   openModal(`<h3>新增商品</h3>
     <div class="form-group" style="margin:10px 0"><label>商品類型</label>
       <div style="display:flex;gap:16px;margin-top:4px">
-        <label style="display:flex;align-items:center;gap:4px;cursor:pointer"><input type="radio" name="bpKind" value="box" ${isSingle?'':'checked'} onchange="toggleBpKind()">拆盒</label>
+        <label style="display:flex;align-items:center;gap:4px;cursor:pointer"><input type="radio" name="bpKind" value="box" ${!isSingle&&!isBlind?'checked':''} onchange="toggleBpKind()">拆盒</label>
+        <label style="display:flex;align-items:center;gap:4px;cursor:pointer"><input type="radio" name="bpKind" value="blind" ${isBlind?'checked':''} onchange="toggleBpKind()">全盲抽</label>
         <label style="display:flex;align-items:center;gap:4px;cursor:pointer"><input type="radio" name="bpKind" value="single" ${isSingle?'checked':''} onchange="toggleBpKind()">單領</label>
       </div></div>
     <div class="form-group" style="margin:10px 0"><label>商品名稱</label><input id="bpN" placeholder="例：第一彈徽章"></div>
@@ -2644,6 +2728,11 @@ function showAddBoxProductModal(gid,defaultKind){
       ${bpSortField('fifo')}
       <div class="form-group" style="margin:8px 0"><label>需綁設定</label>
         <div id="bindInputs"><p class="muted" style="font-size:11px">請先輸入款式</p></div></div>
+      <div id="bpBlindOnly" style="display:${isBlind?'block':'none'};margin:10px 0;padding:10px;background:#fff9df;border:1px solid #ead48e;border-radius:6px">
+        <label style="display:inline-flex;align-items:center;gap:5px;font-weight:bold;cursor:pointer"><input type="checkbox" id="bpBlindOpened" onchange="toggleBlindOpenedInputs()">已拆配</label>
+        <p class="muted" style="font-size:11px;margin:5px 0 8px">勾選時會保存目前成團結果，再依實際開出數量重新分配。</p>
+        <div id="blindCountInputs" class="form-row"></div>
+      </div>
       <div id="priceSection" style="display:none">
         <div class="form-group"><label id="priceInputLabel">各款價格</label><div id="priceInputs"></div></div>
         <div id="priceSummary" class="price-summary" style="display:none"></div>
@@ -2653,6 +2742,7 @@ function showAddBoxProductModal(gid,defaultKind){
       <div class="form-row"><div class="form-group"><label>單價（每個）</label><input id="bpUnit" type="number" min="0" placeholder="例：150"></div></div>
     </div>
     <div class="btn-row"><button class="bp" onclick="addBoxProduct(${gid})">新增</button><button onclick="closeModal()">取消</button></div>`);
+  refreshBlindCountInputs();
   setTimeout(()=>$('#bpN').focus(),100);
 }
 function addBoxProduct(gid){
@@ -2670,6 +2760,9 @@ function addBoxProduct(gid){
     closeModal();render();return;
   }
   if(!contents.length){alert('請輸入至少一個款式');return;}
+  if(new Set(contents).size!==contents.length){alert('款式名稱不可重複');return;}
+  const blindOpened=kind==='blind'&&!!$('#bpBlindOpened')?.checked;
+  const blindCounts=kind==='blind'?collectBlindCounts(contents):{};
   const priceMode=currentBpPriceMode();
   if(priceMode==='adjust'&&Math.abs(priceDiff())>=0.01){alert(`調價合計需為 ±0（目前 ${priceDiff()>0?'+':''}$${Math.round(priceDiff())}）`);return;}
   const avgPrice=priceMode==='fixed'?0:(parseFloat($('#bpAvg')?.value)||0);
@@ -2685,18 +2778,20 @@ function addBoxProduct(gid){
   const bindItems=collectBindItems(contents);
   const sortRule=document.querySelector('input[name=bpSort]:checked')?.value||'fifo';
   upG(gid,g=>{if(!g.boxProducts)g.boxProducts=[];
-    g.boxProducts.push({id:g.nBid++,name,kind:'box',contents,maxBoxes:parseInt($('#bpMax').value)||0,pricePerBox:parseFloat($('#bpPrice').value)||0,priceMode,adjustPrice:priceMode==='adjust',avgPrice,itemPrices:priceMode==='average'?{}:itemPrices,bindItems,sortRule,img,surcharge});});
+    g.boxProducts.push({id:g.nBid++,name,kind,contents,maxBoxes:parseInt($('#bpMax').value)||0,pricePerBox:parseFloat($('#bpPrice').value)||0,priceMode,adjustPrice:priceMode==='adjust',avgPrice,itemPrices:priceMode==='average'?{}:itemPrices,bindItems,sortRule,img,surcharge,blindOpened,blindCounts,blindBaseline:[]});});
   closeModal();render();
 }
 function showEditBoxProductModal(gid,bid){
   const g=getG(gid),p=(g.boxProducts||[]).find(b=>b.id===bid);if(!p)return;
   const priceMode=bpPriceMode(p);
   const isSingle=p.kind==='single';
+  const isBlind=p.kind==='blind';
   _bpImg=null;
   openModal(`<h3>編輯商品</h3>
     <div class="form-group" style="margin:10px 0"><label>商品類型</label>
       <div style="display:flex;gap:16px;margin-top:4px">
-        <label style="display:flex;align-items:center;gap:4px;cursor:pointer"><input type="radio" name="bpKind" value="box" ${isSingle?'':'checked'} onchange="toggleBpKind()">拆盒</label>
+        <label style="display:flex;align-items:center;gap:4px;cursor:pointer"><input type="radio" name="bpKind" value="box" ${!isSingle&&!isBlind?'checked':''} onchange="toggleBpKind()">拆盒</label>
+        <label style="display:flex;align-items:center;gap:4px;cursor:pointer"><input type="radio" name="bpKind" value="blind" ${isBlind?'checked':''} onchange="toggleBpKind()">全盲抽</label>
         <label style="display:flex;align-items:center;gap:4px;cursor:pointer"><input type="radio" name="bpKind" value="single" ${isSingle?'checked':''} onchange="toggleBpKind()">單領</label>
       </div></div>
     <div class="form-group" style="margin:10px 0"><label>名稱</label><input id="bpN" value="${esc(p.name)}"></div>
@@ -2719,6 +2814,11 @@ function showEditBoxProductModal(gid,bid){
       ${bpSortField(p.sortRule||'fifo')}
       <div class="form-group" style="margin:8px 0"><label>需綁設定</label>
         <div id="bindInputs"></div></div>
+      <div id="bpBlindOnly" style="display:${isBlind?'block':'none'};margin:10px 0;padding:10px;background:#fff9df;border:1px solid #ead48e;border-radius:6px">
+        <label style="display:inline-flex;align-items:center;gap:5px;font-weight:bold;cursor:pointer"><input type="checkbox" id="bpBlindOpened" ${p.blindOpened?'checked':''} onchange="toggleBlindOpenedInputs()">已拆配</label>
+        <p class="muted" style="font-size:11px;margin:5px 0 8px">第一次勾選會保存目前成團結果，實際成立數量依下方開出數量與原順位計算。</p>
+        <div id="blindCountInputs" class="form-row"></div>
+      </div>
       <div id="priceSection" style="display:${priceMode==='average'?'none':'block'}">
         <div class="form-group"><label id="priceInputLabel">各款價格</label><div id="priceInputs"></div></div>
         <div id="priceSummary" class="price-summary" style="display:none"></div>
@@ -2730,6 +2830,8 @@ function showEditBoxProductModal(gid,bid){
     <div class="btn-row"><button class="bp" onclick="saveBoxProductEdit(${gid},${bid})">儲存</button><button onclick="closeModal()">取消</button></div>`);
   if(priceMode!=='average'&&!isSingle)refreshPriceInputs(p.itemPrices||{},priceMode);
   if(!isSingle)refreshBindInputs(p.bindItems||{});
+  refreshBlindCountInputs(p.blindCounts||{});
+  toggleBlindOpenedInputs();
 }
 function remapProductSlotKeys(obj,renameMap){
   if(!obj)return obj;
@@ -2753,6 +2855,14 @@ function renameProductContents(g,p,oldContents,newContents){
   p.pins=remapProductSlotKeys(p.pins,renameMap);
   p.frozenPins=remapProductSlotKeys(p.frozenPins,renameMap);
   p.layoutPins=remapProductSlotKeys(p.layoutPins,renameMap);
+  p.rowPrices=remapProductSlotKeys(p.rowPrices,renameMap);
+  if(p.blindCounts){
+    const next={};for(const[key,value]of Object.entries(p.blindCounts))next[renameMap[key]||key]=value;p.blindCounts=next;
+  }
+  if(p.blindAllocPins){
+    const next={};for(const[key,value]of Object.entries(p.blindAllocPins))next[renameMap[key]||key]=value;p.blindAllocPins=next;
+  }
+  if(p.blindBaseline)for(const row of p.blindBaseline)if(renameMap[row.item])row.item=renameMap[row.item];
   if(g.ship){
     const moved={};
     for(const[key,value]of Object.entries(g.ship)){
@@ -2770,6 +2880,8 @@ function saveBoxProductEdit(gid,bid){
   let contents=$('#bpC').value.trim().split(/[\n\/,，]/).map(s=>s.trim()).filter(Boolean);
   const kind=document.querySelector('input[name=bpKind]:checked')?.value||'box';
   const surcharge=parseFloat($('#bpSur')?.value)||0;
+  const blindOpened=kind==='blind'&&!!$('#bpBlindOpened')?.checked;
+  const blindCounts=kind==='blind'?collectBlindCounts(contents):{};
   if(new Set(contents).size!==contents.length){alert('款式名稱不可重複');return;}
   if(kind==='single'){
     const unitPrice=parseFloat($('#bpUnit')?.value)||0;
@@ -2781,6 +2893,7 @@ function saveBoxProductEdit(gid,bid){
       p.name=nextName;p.kind='single';
       p.contents=nextContents;p.unitPrice=unitPrice;
       p.maxBoxes=0;p.pricePerBox=0;p.priceMode='average';p.adjustPrice=false;p.avgPrice=0;p.itemPrices={};
+      delete p.blindOpened;delete p.blindCounts;delete p.blindBaseline;delete p.blindAllocPins;delete p.rowPrices;
       p.surcharge=surcharge;
       if(_bpImg!==null)p.img=_bpImg;});
     closeModal();render();return;
@@ -2801,9 +2914,15 @@ function saveBoxProductEdit(gid,bid){
   const bindItems=collectBindItems(contents);
   const sortRule=document.querySelector('input[name=bpSort]:checked')?.value||'fifo';
   upG(gid,g=>{const p=(g.boxProducts||[]).find(b=>b.id===bid);if(!p)return;
+    const wasBlindOpened=p.kind==='blind'&&p.blindOpened;
+    if(kind==='blind'&&blindOpened&&!wasBlindOpened)p.blindBaseline=getRegularProductConfirmedOrders(g,p);
     renameProductContents(g,p,oldContents,contents);
-    p.name=$('#bpN').value.trim()||p.name;p.kind='box';p.contents=contents;p.maxBoxes=parseInt($('#bpMax').value)||0;p.pricePerBox=parseFloat($('#bpPrice').value)||0;
+    p.name=$('#bpN').value.trim()||p.name;p.kind=kind;p.contents=contents;p.maxBoxes=parseInt($('#bpMax').value)||0;p.pricePerBox=parseFloat($('#bpPrice').value)||0;
     p.priceMode=priceMode;p.adjustPrice=priceMode==='adjust';p.avgPrice=avgPrice;p.itemPrices=priceMode==='average'?{}:itemPrices;p.bindItems=bindItems;p.sortRule=sortRule;p.surcharge=surcharge;
+    if(kind==='blind'){
+      p.blindOpened=blindOpened;p.blindCounts=blindCounts;
+      if(!blindOpened){delete p.blindBaseline;delete p.blindAllocPins;}
+    }else{delete p.blindOpened;delete p.blindCounts;delete p.blindBaseline;delete p.blindAllocPins;}
     if(_bpImg!==null)p.img=_bpImg;});
   closeModal();render();
 }
@@ -3027,7 +3146,7 @@ function lookupPrice(g,itemName,bpId){
   return null;
 }
 function effPrice(g,o){
-  if(g.type==='basic')return o.price||0;
+  if(g.type==='basic'||o.rowPrice)return o.price||0;
   const p=lookupPrice(g,o.item,o.bpId);
   return p!=null?p:(o.price||0);
 }
@@ -3044,6 +3163,83 @@ function bpItemLabel(bp,item){
   if(bp.contents.length===1&&bp.contents[0]===bp.name)return bp.name;
   return `${bp.name}-${item}`;
 }
+function productSlotPrice(g,p,slot){
+  const key=slot.boxIdx+'|||'+slot.item;
+  const custom=Number.isFinite(slot.boxIdx)&&Object.prototype.hasOwnProperty.call(p.rowPrices||{},key);
+  const price=custom?Math.max(0,Number(p.rowPrices[key])||0):(lookupPrice(g,slot.item,p.id)||0);
+  return {price,custom};
+}
+function aggregateProductSlots(g,p,slots){
+  const agg=new Map();
+  for(const s of slots){
+    if(!s||!s.buyer)continue;
+    const priced=productSlotPrice(g,p,s);
+    const key=JSON.stringify([s.buyer.nick,s.item,!!s.buyer.bind,priced.price,priced.custom]);
+    agg.set(key,(agg.get(key)||0)+1);
+  }
+  return [...agg.entries()].map(([key,qty])=>{
+    const[nick,item,bind,price,rowPrice]=JSON.parse(key);
+    return {nick,item,qty,price,note:bind?'綁':'',bpId:p.id,bind,rowPrice};
+  });
+}
+function getRegularProductConfirmedOrders(g,p){
+  const info=calcBoxes(g,p),slots=[];
+  info.boxes.forEach((box,boxIdx)=>{
+    if(box.status==='未成團')return;
+    for(const slot of box)if(slot.buyer)slots.push({...slot,boxIdx});
+  });
+  return aggregateProductSlots(g,p,slots);
+}
+function resolveBlindProductSlots(g,p){
+  const info=calcBoxes(g,{...p,maxBoxes:0}),selected=[];
+  for(const item of p.contents){
+    const limit=Math.max(0,parseInt((p.blindCounts||{})[item])||0);
+    if(!limit)continue;
+    const queue=info.boxes.map((box,boxIdx)=>{
+      const slot=box.find(s=>s.item===item);
+      return slot&&slot.buyer?{...slot,boxIdx}:null;
+    }).filter(Boolean);
+    const used=new Set(),itemSlots=[];
+    for(const pin of((p.blindAllocPins||{})[item]||[])){
+      if(itemSlots.length>=limit)break;
+      const idx=queue.findIndex((slot,i)=>!used.has(i)&&(pin.oid?slot.buyer.oid===pin.oid&&slot.buyer.bind===!!pin.bind:slot.buyer.nick===pin.nick&&slot.buyer.bind===!!pin.bind));
+      if(idx>=0){used.add(idx);itemSlots.push(queue[idx]);}
+    }
+    for(let i=0;i<queue.length&&itemSlots.length<limit;i++){
+      if(!used.has(i)){used.add(i);itemSlots.push(queue[i]);}
+    }
+    selected.push(...itemSlots);
+  }
+  return selected;
+}
+function stabilizeBlindAllocation(g,p){
+  if(p.kind!=='blind'||!p.blindOpened)return;
+  const pins={};
+  for(const slot of resolveBlindProductSlots(g,p)){
+    (pins[slot.item]=pins[slot.item]||[]).push({nick:slot.buyer.nick,bind:!!slot.buyer.bind,oid:slot.buyer.oid||0});
+  }
+  p.blindAllocPins=pins;
+}
+function getBlindProductConfirmedOrders(g,p){
+  if(!p.blindOpened)return getRegularProductConfirmedOrders(g,p);
+  return aggregateProductSlots(g,p,resolveBlindProductSlots(g,p));
+}
+function getBlindAdjustmentMap(g){
+  const result={};
+  const add=(nick,amount)=>{
+    if(!result[nick])result[nick]=0;
+    result[nick]+=amount;
+  };
+  for(const p of(g.boxProducts||[])){
+    if(p.kind!=='blind'||!p.blindOpened)continue;
+    const baseline=Array.isArray(p.blindBaseline)?p.blindBaseline:getRegularProductConfirmedOrders(g,p);
+    const actual=getBlindProductConfirmedOrders(g,p);
+    for(const o of baseline)add(o.nick,-o.qty*effPrice(g,o));
+    for(const o of actual)add(o.nick,o.qty*effPrice(g,o));
+  }
+  for(const nick of Object.keys(result))result[nick]=Math.round(result[nick]*100)/100;
+  return result;
+}
 function getConfirmedOrders(g){
   if(g.type!=='box'||!(g.boxProducts||[]).length)return g.orders;
   const res=[];const covered=new Set();
@@ -3053,20 +3249,7 @@ function getConfirmedOrders(g){
       continue;
     }
     for(const o of g.orders){if(p.contents.includes(o.item)&&orderMatches(p,o))covered.add(o.id);}
-    const info=calcBoxes(g,p);
-    const agg={};
-    for(const box of info.boxes){
-      if(box.status==='未成團')continue;
-      for(const s of box){
-        if(!s.buyer)continue;
-        const key=s.buyer.nick+'|||'+s.item+'|||'+(s.buyer.bind?1:0);
-        agg[key]=(agg[key]||0)+1;
-      }
-    }
-    for(const[key,qty]of Object.entries(agg)){
-      const[nick,item,bindF]=key.split('|||');
-      res.push({nick,item,qty,price:lookupPrice(g,item,p.id)||0,note:bindF==='1'?'綁':'',bpId:p.id,bind:bindF==='1'});
-    }
+    res.push(...(p.kind==='blind'&&p.blindOpened?getBlindProductConfirmedOrders(g,p):getRegularProductConfirmedOrders(g,p)));
   }
   for(const o of g.orders){if(!covered.has(o.id))res.push(o);}
   return res;
