@@ -172,7 +172,7 @@ td:hover .slot-del{display:inline}
 </head>
 <body>
 <div class="app" id="app"></div>
-<div class="modal-bg" id="modalBg" onclick="if(event.target===this)closeModal()">
+<div class="modal-bg" id="modalBg">
   <div class="modal" id="modalContent"></div>
 </div>
 
@@ -291,11 +291,39 @@ function applyTheme(){
   document.querySelectorAll('.tab.active').forEach(el=>{el.style.color=s.accentColor;el.style.borderBottomColor=s.accentColor;});
 }
 
+function localDateValue(ts){
+  const d=new Date(Number(ts)||Date.now());
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+}
+function groupOpenedAt(g){
+  const m=String(g.createdAt||'').match(/^(\d{4})[\/-](\d{1,2})[\/-](\d{1,2})/);
+  return m?new Date(Number(m[1]),Number(m[2])-1,Number(m[3])).getTime():0;
+}
+function inferMemberJoinedAt(db,nick){
+  const times=(db.groups||[]).filter(g=>(g.orders||[]).some(o=>o.nick===nick)).map(groupOpenedAt).filter(Boolean);
+  return times.length?Math.min(...times):Date.now();
+}
+function releaseLegacyBindLocks(db){
+  let changed=false;
+  for(const g of db?.groups||[]){
+    for(const p of g.boxProducts||[]){
+      const frozen=p.frozenPins;if(!frozen)continue;
+      const releaseRows=new Set();
+      for(const[key,pin]of Object.entries(frozen)){
+        if(pin&&typeof pin==='object'&&(pin.empty||pin.bind))releaseRows.add(parseInt(key.split('|||')[0]));
+      }
+      if(!releaseRows.size)continue;
+      for(const key of Object.keys(frozen))if(releaseRows.has(parseInt(key.split('|||')[0])))delete frozen[key];
+      changed=true;
+    }
+  }
+  return changed;
+}
 let _vdb=null;
 function loadDB(){
-  if(RO){if(!_vdb)_vdb=window.VIEWER_DB;return _vdb;}
+  if(RO){if(!_vdb){_vdb=window.VIEWER_DB;releaseLegacyBindLocks(_vdb);}return _vdb;}
   const db=JSON.parse(localStorage.getItem('gp_db2')||'{"groups":[],"nid":1}');
-  let changed=false;
+  let changed=releaseLegacyBindLocks(db);
   const statusMap={'開團中':'進行中','已截單':'收款中','已封存':'已結團'};
   for(const g of db.groups){
     if(statusMap[g.status]){g.status=statusMap[g.status];changed=true;}
@@ -310,6 +338,7 @@ function loadDB(){
   }
   if(!db.fixedTeam)db.fixedTeam={};
   if(!db.teamNotes)db.teamNotes={};
+  if(!db.teamJoinedAt)db.teamJoinedAt={};
   if(!db.units)db.units=[]; // 團體庫：{id,name,icon}
   if(!db.roles)db.roles=[]; // 固位角色清單
   if(!db.roleUnits)db.roleUnits={}; // 角色所屬團體：{角色名稱:團體id}
@@ -321,6 +350,11 @@ function loadDB(){
       delete g.fixedTeam;changed=true;
     }
   }
+  for(const nick of Object.keys(db.fixedTeam||{})){
+    if(!Number.isFinite(Number(db.teamJoinedAt[nick]))){
+      db.teamJoinedAt[nick]=inferMemberJoinedAt(db,nick);changed=true;
+    }
+  }
   const knownRoles=new Set(db.roles);
   for(const slots of Object.values(db.fixedTeam||{})){
     for(const role of Object.keys(slots||{})){
@@ -329,6 +363,7 @@ function loadDB(){
   }  for(const g of db.groups){
     if(g.type==='box'&&(g.boxProducts||[]).length){
       for(const o of g.orders){
+        if(o.bind&&o.autoBind==null){o.autoBind=true;changed=true;}
         if(o.bpId==null){
           const bp=g.boxProducts.find(p=>p.contents.includes(o.item));
           if(bp){o.bpId=bp.id;changed=true;}
@@ -547,10 +582,10 @@ function renderOrdersTab(g){
       if(isBox){const bp=(g.boxProducts||[]).find(p=>orderMatches(p,o)&&p.contents.includes(o.item));boxName=bp?bp.name:'';}
       const pr=effPrice(g,o);
       const isTeam=!!_team[o.nick];
-      const fxBadge=(!isTeam&&o.fixed==='slot'?` <span class="badge b-purple">固${o.fixedRank||''}</span>`:!isTeam&&o.fixed==='pick'?' <span class="badge b-teal">撿</span>':'')+(o.lift?' <span class="badge b-amber">提</span>':'');
+      const fxBadge=(!isTeam&&o.fixed==='slot'?` <span class="badge b-purple">固${o.fixedRank||''}</span>`:!isTeam&&o.fixed==='pick'?' <span class="badge b-teal">撿</span>':'')+(o.bindLift?' <span class="badge b-amber">綁提</span>':o.lift?' <span class="badge b-amber">提</span>':'');
       h+=`<tr><td>${isTeam?`<span style="color:#a32d2d;font-weight:bold">${esc(o.nick)}</span>`:esc(o.nick)}${fxBadge}</td><td>${esc(o.item)}</td>
         ${isBox?`<td>${boxName?`<span class="badge b-coral">${esc(boxName)}</span>`:`<span class="muted">未對應</span>`}</td>`:''}
-        <td>${o.qty}</td><td>${pr?'$'+pr:'-'}</td><td>${pr?'$'+(o.qty*pr):'-'}</td>
+        <td>${o.all?'<span class="badge b-green">已 all</span>':o.qty}</td><td>${pr?'$'+pr:'-'}</td><td>${o.all?'<span class="muted">依成團數</span>':pr?'$'+(o.qty*pr):'-'}</td>
         <td class="muted">${esc(o.note||'')}</td>
         <td class="muted" style="white-space:nowrap">${fmtTs(o.ts)}</td>
         ${RO?'':`<td style="white-space:nowrap"><button class="bs bg" onclick="showEditOrderModal(${g.id},${o.id})">編輯</button>
@@ -652,6 +687,7 @@ function buildViewerDataJs(){
     groups,
     nid:db.nid,
     fixedTeam:db.fixedTeam||{},
+    teamJoinedAt:db.teamJoinedAt||{},
     teamNotes:{},
     buyers:{},
     units:db.units||[],
@@ -714,7 +750,7 @@ function importFullBackup(input){
 }
 function preserveMissingAdminLibraries(incoming){
   const current=loadDB();
-  for(const key of ['roles','roleUnits','units','unitNid']){
+  for(const key of ['roles','roleUnits','units','unitNid','teamJoinedAt']){
     if(!Object.prototype.hasOwnProperty.call(incoming,key)&&Object.prototype.hasOwnProperty.call(current,key)){
       incoming[key]=JSON.parse(JSON.stringify(current[key]));
     }
@@ -942,18 +978,26 @@ function ftSlotChip(s,pos){
     <span onclick="this.closest('.ftSlot').remove()" style="cursor:pointer;color:#a32d2d;font-weight:bold" title="刪除此角色位">✕</span></span>`;
 }
 function ftMemberBlock(nick,slots){
-  return `<div class="ft-member" data-nick="${esc(nick)}" style="margin-bottom:10px;padding:8px;background:#fef7fa;border-radius:8px">
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px"><strong style="color:#a32d2d">${esc(nick)}</strong>
-      <button class="bs" style="color:#a32d2d" onclick="this.closest('.ft-member').remove()">移除成員</button></div>
+  return `<div class="ft-member" data-nick="${esc(nick)}" style="margin-bottom:10px;padding:8px;background:#fef7fa;border:1px solid var(--line);border-radius:8px">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;gap:8px"><strong style="color:#a32d2d">${esc(nick)}</strong>
+      <button class="bs" style="color:#a32d2d" onclick="removeFixedMember(this)">移除成員</button></div>
     <div class="ftSlots" style="display:flex;flex-wrap:wrap;gap:4px 8px">
-    ${Object.entries(slots).map(([s,pos])=>ftSlotChip(s,pos)).join('')}
+      ${Object.entries(slots).map(([s,pos])=>ftSlotChip(s,pos)).join('')}
     </div>
     <div style="display:flex;gap:4px;margin-top:6px;align-items:center;flex-wrap:wrap">
       <select class="ftAddStyle" style="font-size:12px;min-width:140px">${roleSelectOptions()}</select>
       <select class="ftAddPos" style="font-size:12px">${ftPosOptions('pick')}</select>
       <button class="bs" onclick="ftAddSlot(this)">＋ 加角色位</button>
     </div>
-    <div style="margin-top:6px"><input class="ftNote" value="${esc(_ftNotes[nick]||'')}" placeholder="備註" style="width:100%;font-size:12px"></div></div>`;
+    <div style="display:flex;gap:8px;margin-top:6px;align-items:flex-end;flex-wrap:wrap">
+      <div class="form-group" style="min-width:135px"><label>加入日期</label><input class="ftJoinedAt" type="date" value="${localDateValue(_ftJoinedAt[nick])}" style="font-size:12px"></div>
+      <div class="form-group" style="flex:1;min-width:160px"><label>備註</label><input class="ftNote" value="${esc(_ftNotes[nick]||'')}" placeholder="備註" style="width:100%;font-size:12px"></div>
+    </div>
+    <div class="btn-row" style="margin-top:10px">
+      <button class="bp" onclick="saveFixedMember(this)">儲存</button>
+      <button onclick="cancelFixedMemberEdit(this)">取消</button>
+    </div>
+  </div>`;
 }
 // 固位角色清單（跨團共用，存於 db.roles；所屬團體存於 db.roleUnits）
 function getRoles(){return loadDB().roles||[];}
@@ -987,7 +1031,8 @@ function setRoleUnit(role,value){
   else delete db.roleUnits[role];
   saveDB(db);
   const list=$('#roleList');if(list)list.innerHTML=roleListHtml();
-}function roleListHtml(){
+}
+function roleListHtml(){
   const db=loadDB(),roles=db.roles||[],units=db.units||[],map=db.roleUnits||{};
   if(!roles.length)return '<span class="muted">尚未新增角色</span>';
   let h='';
@@ -1045,26 +1090,29 @@ function ftAddSlot(btn){
   const posObj=pos==='pick'?{t:'pick'}:{t:'slot',r:parseInt(pos.slice(5))||1};
   member.querySelector('.ftSlots').insertAdjacentHTML('beforeend',ftSlotChip(s,posObj));
 }
-let _ftTeam={},_ftNotes={},_ftPass={};
+let _ftTeam={},_ftNotes={},_ftJoinedAt={},_ftPass={};
 // 固位 pass 統計：特殊團（★）截團後，固位成員沒喊自己固位角色的商品即算一次 pass（連續累計）
 // 只要在較新的特殊團裡有喊該角色，之前累積的 pass 次數就歸零重新算起
 // 條件：該團有販售該角色（在某商品的款式中）；有喊單（綁單不算）即中斷連續紀錄
 function passStats(){
-  const team=getTeam();
+  const db=loadDB(),team=db.fixedTeam||{},joinedMap=db.teamJoinedAt||{};
   // 依開團時間新→舊排序，逐團往回推算「連續 pass 次數」
   const byNew=(a,b)=>(b.createdAt||'').localeCompare(a.createdAt||'')||b.id-a.id;
-  const starGroups=loadDB().groups.filter(g=>g.type==='box'&&g.starGroup&&g.status!=='進行中').sort(byNew);
+  const starGroups=db.groups.filter(g=>g.type==='box'&&g.starGroup).sort(byNew);
   const res={};
   for(const[nick,slots]of Object.entries(team)){
     for(const[style,pos]of Object.entries(slots||{})){
       if(pos.t!=='slot')continue; // 只監控固位角色
       let count=0;
+      const joinedAt=Number(joinedMap[nick])||0;
       for(const g of starGroups){
+        const openedAt=groupOpenedAt(g);
+        if(joinedAt&&openedAt&&openedAt<joinedAt)continue;
         const styles=new Set((g.boxProducts||[]).flatMap(p=>p.contents));
         if(!styles.has(style))continue; // 該團沒賣這個角色不算
         const hasOrder=g.orders.some(o=>!o.bind&&o.nick===nick&&o.item===style);
-        if(hasOrder)break; // 有喊單 → 中斷連續紀錄，之前的 pass 不列入
-        count++;
+        if(hasOrder)break; // 進行中的星號團只要已喊，就立即把先前 pass 歸零
+        if(g.status!=='進行中')count++; // 尚未截團且沒喊，暫時不增加 pass
       }
       if(count>0){res[nick]=res[nick]||{};res[nick][style]=count;}
     }
@@ -1073,14 +1121,17 @@ function passStats(){
 }
 function ftOverviewRow(nick,slots){
   const summary=Object.entries(slots||{}).map(([s,pos])=>`${esc(s)} ${pos.t==='pick'?'撿漏':'固'+(pos.r||1)}`).join('、')||'<span class="muted">（無角色位）</span>';
+  const joined=`加入 ${localDateValue(_ftJoinedAt[nick]).replace(/-/g,'/')}`;
   const note=_ftNotes[nick]?`<span class="muted" style="font-size:11px;white-space:nowrap;max-width:140px;overflow:hidden;text-overflow:ellipsis">${esc(_ftNotes[nick])}</span>`:'';
   const passHtml=Object.entries(_ftPass[nick]||{}).map(([s,n])=>
     `<span class="badge ${n>=2?'b-red':'b-amber'}" title="★${esc(s)} pass ${n} 次${n>=2?'，建議撤銷固位':''}">${n>=2?'⚠ ':''}★${esc(s)}×${n}</span>`).join(' ');
-  return `<div class="ft-row" data-nick="${esc(nick)}" style="display:flex;align-items:center;gap:8px;padding:6px 8px;border-bottom:.5px solid #fdf1f6">
+  return `<div class="ft-row" data-nick="${esc(nick)}" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:6px 8px;border-bottom:.5px solid #fdf1f6">
     <strong style="color:#a32d2d;white-space:nowrap">${esc(nick)}</strong>
-    <span style="flex:1;font-size:12px">${summary}</span>
+    <span class="muted" style="font-size:11px;white-space:nowrap">${joined}</span>
+    <span style="flex:1;min-width:120px;font-size:12px">${summary}</span>
     ${passHtml}
     ${note}
+    <button class="bs" onclick="renameFixedMember('${encodeURIComponent(nick)}')">改名</button>
     <button class="bs" onclick="ftExpand(this)">編輯</button></div>`;
 }
 function ftExpand(btn){
@@ -1088,7 +1139,51 @@ function ftExpand(btn){
   const nick=row.dataset.nick;
   row.outerHTML=ftMemberBlock(nick,_ftTeam[nick]||{});
 }
-let _ftView='style';
+function readFixedMemberBlock(member){
+  const nick=member.dataset.nick,slots={};
+  member.querySelectorAll('.ftSlot').forEach(chip=>{
+    const style=chip.dataset.style,value=chip.querySelector('.ftSel')?.value;
+    if(!style||!value)return;
+    if(value==='pick')slots[style]={t:'pick'};
+    else if(value.startsWith('slot:'))slots[style]={t:'slot',r:parseInt(value.slice(5))||1};
+  });
+  const note=member.querySelector('.ftNote')?.value.trim()||'';
+  const dateValue=member.querySelector('.ftJoinedAt')?.value;
+  const previous=Number(_ftJoinedAt[nick])||0;
+  const joinedAt=dateValue===localDateValue(previous)?previous:(dateValue?new Date(dateValue+'T00:00:00').getTime():Date.now());
+  return {nick,slots,note,joinedAt};
+}
+function saveFixedMember(btn){
+  const member=btn.closest('.ft-member');if(!member)return;
+  const data=readFixedMemberBlock(member),db=loadDB();
+  db.fixedTeam[data.nick]=data.slots;
+  if(data.note)db.teamNotes[data.nick]=data.note;else delete db.teamNotes[data.nick];
+  db.teamJoinedAt[data.nick]=data.joinedAt;
+  saveDB(db);
+  _ftTeam[data.nick]=data.slots;
+  if(data.note)_ftNotes[data.nick]=data.note;else delete _ftNotes[data.nick];
+  _ftJoinedAt[data.nick]=data.joinedAt;
+  _ftPass=passStats();
+  member.outerHTML=ftOverviewRow(data.nick,data.slots);
+  filterFixedMembers();render();
+}
+function cancelFixedMemberEdit(btn){
+  const member=btn.closest('.ft-member');if(!member)return;
+  const nick=member.dataset.nick;
+  member.outerHTML=ftOverviewRow(nick,_ftTeam[nick]||{});
+  filterFixedMembers();
+}
+function removeFixedMember(btn){
+  const member=btn.closest('.ft-member');if(!member)return;
+  const nick=member.dataset.nick;
+  if(!confirm(`從固團成員移除「${nick}」？\n既有喊單不會刪除，但之後不再套用固位或撿漏順位。`))return;
+  const db=loadDB();
+  delete db.fixedTeam[nick];delete db.teamNotes[nick];delete db.teamJoinedAt[nick];
+  saveDB(db);
+  delete _ftTeam[nick];delete _ftNotes[nick];delete _ftJoinedAt[nick];
+  member.remove();filterFixedMembers();render();
+}
+let _ftView='style',_ftSearch='';
 function ftStyleCard(s,entries){
   const slots=entries.filter(x=>x.pos.t==='slot').sort((a,b)=>(a.pos.r||1)-(b.pos.r||1));
   const picks=entries.filter(x=>x.pos.t==='pick');
@@ -1127,11 +1222,32 @@ function ftStyleView(){
       ${section.styles.sort((a,b)=>a.localeCompare(b,'zh-Hant')).map(s=>ftStyleCard(s,byStyle[s])).join('')}
     </div></section>`).join('');
 }
-function switchFtView(v){_ftView=v;showFixedTeamModal(true);}
+function filterFixedMembers(){
+  const list=$('#ftList');if(!list)return;
+  const query=String(_ftSearch||'').trim().toLocaleLowerCase();
+  let visible=0;
+  for(const member of list.querySelectorAll('.ft-row,.ft-member')){
+    const matched=!query||String(member.dataset.nick||'').toLocaleLowerCase().includes(query);
+    member.style.display=matched?'':'none';
+    if(matched)visible++;
+  }
+  const empty=$('#ftSearchEmpty');
+  if(empty)empty.style.display=visible?'none':'block';
+}
+function stashFixedTeamForm(){
+  if(!$('#ftList'))return;
+  const current=collectFixedTeamForm();
+  _ftTeam=current.team;_ftNotes=current.notes;_ftJoinedAt=current.joinedAt;
+}
+function switchFtView(v){
+  if(_ftView==='member')stashFixedTeamForm();
+  _ftView=v;showFixedTeamModal(true);
+}
 function showFixedTeamModal(keepTeam){
   if(!keepTeam){
     _ftTeam=JSON.parse(JSON.stringify(getTeam()));
     _ftNotes=JSON.parse(JSON.stringify(loadDB().teamNotes||{}));
+    _ftJoinedAt=JSON.parse(JSON.stringify(loadDB().teamJoinedAt||{}));
   }
   _ftPass=passStats();
   const isStyle=_ftView==='style';
@@ -1140,7 +1256,7 @@ function showFixedTeamModal(keepTeam){
       <button class="bs ${isStyle?'bp':''}" onclick="switchFtView('style')">依角色</button>
       <button class="bs ${isStyle?'':'bp'}" onclick="switchFtView('member')">依成員</button>
       <div style="flex:1"></div>
-      <button class="bs" onclick="showRolesModal()">編輯角色清單</button>
+      <button class="bs" onclick="stashFixedTeamForm();showRolesModal()">編輯角色清單</button>
     </div>`;
   if(isStyle){
     h+=`<div style="max-height:55vh;overflow-y:auto">${ftStyleView()}</div>
@@ -1150,44 +1266,132 @@ function showFixedTeamModal(keepTeam){
       <div style="display:flex;gap:6px;margin-bottom:10px;align-items:flex-end">
         <div class="form-group" style="flex:1"><label>新增成員暱稱</label><input id="ftNick"></div>
         <button class="bs bp" onclick="addTeamMember()" style="margin-bottom:2px">新增</button></div>
+      <div class="form-group" style="margin-bottom:10px"><label>搜尋成員名稱</label>
+        <input id="ftSearch" type="search" value="${esc(_ftSearch)}" placeholder="輸入部分名稱即可" oninput="_ftSearch=this.value;filterFixedMembers()"></div>
       <div id="ftList" style="max-height:50vh;overflow-y:auto">`;
     for(const[nick,slots]of Object.entries(_ftTeam))h+=ftOverviewRow(nick,slots||{});
-    h+=`</div>
-      <div class="btn-row"><button class="bp" onclick="saveFixedTeam()">儲存</button><button onclick="closeModal()">取消</button></div>`;
+    h+=`<div id="ftSearchEmpty" class="empty" style="display:none">找不到符合的成員</div></div>
+      <div class="btn-row"><button onclick="closeModal()">關閉</button></div>`;
   }
   openModal(h);
-  if(!isStyle)setTimeout(()=>$('#ftNick')?.focus(),100);
+  if(!isStyle){filterFixedMembers();setTimeout(()=>$('#ftNick')?.focus(),100);}
 }
 function addTeamMember(){
   const nick=$('#ftNick').value.trim();
   if(!nick){alert('請輸入暱稱');return;}
-  if(document.querySelector(`.ft-member[data-nick="${CSS.escape(nick)}"],.ft-row[data-nick="${CSS.escape(nick)}"]`)){alert('成員已存在');return;}
+  const db=loadDB();
+  if(Object.prototype.hasOwnProperty.call(db.fixedTeam||{},nick)){
+    alert('成員已存在');return;
+  }
+  const joinedAt=Date.now();
+  db.fixedTeam[nick]={};db.teamJoinedAt[nick]=joinedAt;
+  saveDB(db);
+  _ftTeam[nick]={};_ftJoinedAt[nick]=joinedAt;delete _ftNotes[nick];
   $('#ftList').insertAdjacentHTML('beforeend',ftMemberBlock(nick,{}));
   $('#ftNick').value='';
+  filterFixedMembers();render();
 }
-function saveFixedTeam(){
-  const team={};const notes={};
+function collectFixedTeamForm(){
+  const team={},notes={},joinedAt={};
   document.querySelectorAll('#ftList .ft-row,#ftList .ft-member').forEach(el=>{
     const nick=el.dataset.nick;
     if(el.classList.contains('ft-row')){
       team[nick]=_ftTeam[nick]||{};
       if(_ftNotes[nick])notes[nick]=_ftNotes[nick];
+      joinedAt[nick]=Number(_ftJoinedAt[nick])||Date.now();
       return;
     }
     const slots={};
     el.querySelectorAll('.ftSlot').forEach(chip=>{
-      const s=chip.dataset.style;
-      const v=chip.querySelector('.ftSel')?.value;
-      if(!s||!v)return;
-      if(v==='pick')slots[s]={t:'pick'};
-      else if(v.startsWith('slot:'))slots[s]={t:'slot',r:parseInt(v.slice(5))||1};
+      const style=chip.dataset.style,value=chip.querySelector('.ftSel')?.value;
+      if(!style||!value)return;
+      if(value==='pick')slots[style]={t:'pick'};
+      else if(value.startsWith('slot:'))slots[style]={t:'slot',r:parseInt(value.slice(5))||1};
     });
     team[nick]=slots;
     const note=el.querySelector('.ftNote')?.value.trim();
     if(note)notes[nick]=note;
+    const dateValue=el.querySelector('.ftJoinedAt')?.value;
+    const previous=Number(_ftJoinedAt[nick])||0;
+    joinedAt[nick]=dateValue===localDateValue(previous)?previous:(dateValue?new Date(dateValue+'T00:00:00').getTime():Date.now());
   });
-  const db=loadDB();db.fixedTeam=team;db.teamNotes=notes;saveDB(db);
-  closeModal();render();
+  return {team,notes,joinedAt};
+}
+function nicknameInUse(db,nick){
+  if(Object.prototype.hasOwnProperty.call(db.fixedTeam||{},nick))return true;
+  if(Object.prototype.hasOwnProperty.call(db.buyers||{},nick))return true;
+  return (db.groups||[]).some(g=>(g.orders||[]).some(o=>o.nick===nick)||Object.prototype.hasOwnProperty.call(g.pay||{},nick));
+}
+function renamePinNick(map,oldNick,newNick){
+  for(const key of Object.keys(map||{})){
+    const pin=map[key];
+    if(typeof pin==='string'&&pin===oldNick)map[key]=newNick;
+    else if(pin&&typeof pin==='object'&&pin.nick===oldNick)pin.nick=newNick;
+  }
+}
+function renameMemberEverywhere(db,oldNick,newNick){
+  db.fixedTeam[newNick]=db.fixedTeam[oldNick]||{};
+  delete db.fixedTeam[oldNick];
+  if(Object.prototype.hasOwnProperty.call(db.teamNotes||{},oldNick)){
+    db.teamNotes[newNick]=db.teamNotes[oldNick];
+    delete db.teamNotes[oldNick];
+  }
+  if(Object.prototype.hasOwnProperty.call(db.teamJoinedAt||{},oldNick)){
+    db.teamJoinedAt[newNick]=db.teamJoinedAt[oldNick];
+    delete db.teamJoinedAt[oldNick];
+  }
+  if(Object.prototype.hasOwnProperty.call(db.buyers||{},oldNick)){
+    db.buyers[newNick]=db.buyers[oldNick];
+    delete db.buyers[oldNick];
+  }
+  for(const g of db.groups||[]){
+    for(const order of g.orders||[])if(order.nick===oldNick)order.nick=newNick;
+    if(Object.prototype.hasOwnProperty.call(g.pay||{},oldNick)){
+      g.pay[newNick]=g.pay[oldNick];
+      delete g.pay[oldNick];
+    }
+    if(g.hiddenStatsNicks)g.hiddenStatsNicks=[...new Set(g.hiddenStatsNicks.map(n=>n===oldNick?newNick:n))];
+    if(g.ship){
+      const moved={};
+      for(const[key,value]of Object.entries(g.ship)){
+        const parts=key.split('|||');
+        if(parts.length>=4&&parts[parts.length-1]===oldNick)parts[parts.length-1]=newNick;
+        moved[parts.join('|||')]=value;
+      }
+      g.ship=moved;
+    }
+    for(const product of g.boxProducts||[]){
+      renamePinNick(product.pins,oldNick,newNick);
+      renamePinNick(product.frozenPins,oldNick,newNick);
+      renamePinNick(product.layoutPins,oldNick,newNick);
+      for(const pins of Object.values(product.blindAllocPins||{})){
+        for(const pin of pins||[])if(pin&&pin.nick===oldNick)pin.nick=newNick;
+      }
+    }
+  }
+}
+function renameFixedMember(oldNickEnc){
+  const oldNick=decodeURIComponent(oldNickEnc);
+  const next=prompt(`將「${oldNick}」改成：`,oldNick);
+  if(next==null)return;
+  const newNick=next.trim();
+  if(!newNick){alert('新名字不可空白');return;}
+  if(newNick===oldNick)return;
+  const current=collectFixedTeamForm();
+  _ftTeam=current.team;_ftNotes=current.notes;_ftJoinedAt=current.joinedAt;
+  const db=loadDB();
+  if(Object.prototype.hasOwnProperty.call(_ftTeam,newNick)||nicknameInUse(db,newNick)){
+    alert(`「${newNick}」已經有人使用，不能直接合併。`);return;
+  }
+  if(!confirm(`確定將「${oldNick}」改成「${newNick}」？\n\n所有團的既有喊單、付款、貨況與配單位置會一起更新。`))return;
+  renameMemberEverywhere(db,oldNick,newNick);
+  _ftTeam[newNick]=_ftTeam[oldNick]||{};delete _ftTeam[oldNick];
+  if(Object.prototype.hasOwnProperty.call(_ftNotes,oldNick)){
+    _ftNotes[newNick]=_ftNotes[oldNick];delete _ftNotes[oldNick];
+  }
+  _ftJoinedAt[newNick]=_ftJoinedAt[oldNick]||Date.now();delete _ftJoinedAt[oldNick];
+  saveDB(db);
+  render();showFixedTeamModal(true);
 }
 
 // ── 團體庫（跨團共用，存於 db.units：{id,name,icon}） ──
@@ -1413,7 +1617,7 @@ function bpDetailHtml(g,p){
     else if(surplus>0) st=`<span class="badge b-amber">餘 ${surplus}</span>`;
     else st='<span class="badge b-green">已無</span>';
     h+=`<tr><td>${esc(c)}</td><td>${itemPrice!=null?'$'+itemPrice:'-'}</td><td>${demand}</td><td>${supply}</td><td>${st}</td>
-      <td class="muted">${buyers.map(b=>`${esc(b.nick)}${b.bind?'(綁)':''}×${b.qty}`).join(', ')||'-'}</td></tr>`;
+      <td class="muted">${buyers.map(b=>`${esc(b.nick)}${b.bind?'(綁)':''}${b.all?'（已 all）':'×'+b.qty}`).join(', ')||'-'}</td></tr>`;
   }
   h+=`</tbody></table></div>`;
 
@@ -1425,23 +1629,22 @@ function bpDetailHtml(g,p){
       showN=Math.min(info.boxesNeeded,filled+10);
     }
     h+=`<div style="overflow-x:auto;margin-top:12px"><table><thead><tr><th></th>
-      ${p.contents.map(c=>`<th>${esc(c)}${bind[c]?` <span class="badge b-purple" style="font-size:9px">綁${bind[c]}</span>`:''}</th>`).join('')}<th>狀態</th><th></th></tr></thead><tbody>`;
+      ${p.contents.map(c=>`<th>${esc(c)}${bind[c]?` <span class="badge b-purple" style="font-size:9px">綁${bind[c]} · 序${(p.bindOrder||{})[c]||0}</span>`:''}</th>`).join('')}<th>狀態</th><th></th></tr></thead><tbody>`;
     for(let i=0;i<showN;i++){
       const box=info.boxes[i];
       const priceChanged=Object.keys(p.rowPrices||{}).some(key=>key.startsWith(i+'|||'));
       h+=`<tr><td style="white-space:nowrap;font-weight:bold">第 ${i+1} 配${priceChanged?' *':''}</td>`;
-      const hasEmpty=box.some(s=>!s.buyer);
-      const hasBinder=box.some(s=>s.buyer&&!s.buyer.bind&&bind[s.item]);
+      const bindPlan=box.bindPlan||getBoxBindPlan(p,box);
       for(const slot of box){
         if(slot.buyer){
-          const needBind=hasEmpty&&bind[slot.item]&&!slot.buyer.bind;
-          h+=`<td${needBind?' style="color:#a32d2d;font-weight:bold"':''}>${esc(slot.buyer.nick)}${slot.buyer.bind?'(綁)':''}${slot.buyer.manual?'*':''}<span class="slot-del" title="移除此格喊單" onclick="event.stopPropagation();removeSlotUnit(${g.id},${p.id},${i},'${encodeURIComponent(slot.item)}','${encodeURIComponent(slot.buyer.nick)}',${slot.buyer.bind?1:0})">✕</span></td>`;
+          const needBind=bindPlan.some(x=>x.nick===slot.buyer.nick&&x.binderItem===slot.item);
+          h+=`<td${needBind?' style="color:#a32d2d;font-weight:bold"':''}>${esc(slot.buyer.nick)}${slot.buyer.all?'（all）':''}${slot.buyer.bind?'(綁)':''}${slot.buyer.manual?'*':''}<span class="slot-del" title="移除此格喊單" onclick="event.stopPropagation();removeSlotUnit(${g.id},${p.id},${i},'${encodeURIComponent(slot.item)}','${encodeURIComponent(slot.buyer.nick)}',${slot.buyer.bind?1:0})">✕</span></td>`;
         }
         else h+=`<td class="slot-empty" style="background:#fdf1f6" title="點擊追加喊單" onclick="fillSlot(${g.id},${p.id},${i},'${encodeURIComponent(slot.item)}')"></td>`;
       }
       const sb=box.status==='成團'?'b-green':box.status==='含綁成團'?'b-purple':'b-amber';
       h+=`<td><span class="badge ${sb}">${box.status}</span></td>`;
-      h+=`<td><div style="display:flex;gap:4px;justify-content:flex-end">${hasEmpty&&hasBinder?`<button class="bs bp" onclick="event.stopPropagation();showBindModal(${g.id},${p.id},${i})">綁</button>`:''}${RO?'':`<button class="bs" onclick="event.stopPropagation();showBoxRowPriceModal(${g.id},${p.id},${i})">編輯價格</button>`}</div></td></tr>`;
+      h+=`<td><div style="display:flex;gap:4px;justify-content:flex-end">${bindPlan.length?`<button class="bs bp" onclick="event.stopPropagation();showBindModal(${g.id},${p.id},${i})">綁</button>`:''}${RO?'':`<button class="bs" onclick="event.stopPropagation();showBoxRowPriceModal(${g.id},${p.id},${i})">編輯價格</button>`}</div></td></tr>`;
     }
     if(showN<info.boxesNeeded)h+=`<tr><td colspan="${p.contents.length+3}" class="muted" style="text-align:center">…其餘 ${info.boxesNeeded-showN} 配未顯示</td></tr>`;
     h+=`</tbody></table></div>`;
@@ -1483,24 +1686,42 @@ function resetBoxRowPrices(gid,pid,boxIdx){
   closeModal();render();
 }
 
-function hasUnconfirmedOrders(g,p,nick){
-  const info=calcBoxes(g,p);
+function hasUnconfirmedOrders(g,p,nick,includeBindComplete){
+  const source=includeBindComplete?{...g,orders:g.orders.filter(o=>!(o.bind&&o.autoBind&&orderMatches(p,o)))}:g;
+  const info=calcBoxes(source,p);
   for(const box of info.boxes){
     if(box.every(s=>s.buyer))continue;
     if(box.some(s=>s.buyer&&!s.buyer.bind&&s.buyer.nick===nick))return true;
   }
   return false;
 }
+function clearAutoBindOrders(g,p,item,qty,boxIdx){
+  if(!p)return;
+  let remaining=qty==null?Number.MAX_SAFE_INTEGER:Math.max(0,parseInt(qty)||0);
+  const next=[];
+  for(const o of g.orders){
+    const matches=o.bind&&o.autoBind&&orderMatches(p,o)&&(item==null||o.item===item)&&(boxIdx==null||o.bindBox===boxIdx);
+    if(!matches||remaining<=0){next.push(o);continue;}
+    if(o.qty>remaining){o.qty-=remaining;remaining=0;next.push(o);}
+    else remaining-=o.qty;
+  }
+  g.orders=next;
+}
 
 function removeSlotUnit(gid,pid,boxIdx,itemEnc,nickEnc,isBind){
-  const item=decodeURIComponent(itemEnc),nick=decodeURIComponent(nickEnc);
-  if(!confirm(`移除 ${nick} 的「${item}」1 個？`))return;
+  const item=decodeURIComponent(itemEnc),nick=decodeURIComponent(nickEnc),g=getG(gid);
+  const p=(g?.boxProducts||[]).find(b=>b.id===pid);
+  const source=g?.orders.find(o=>o.nick===nick&&o.item===item&&(!!o.bind)===(!!isBind)&&(p?orderMatches(p,o):true));
+  if(!confirm(source?.all?`取消 ${nick} 對「${item}」的 all？`:`移除 ${nick} 的「${item}」1 個？`))return;
   upG(gid,g=>{
     const p=(g.boxProducts||[]).find(b=>b.id===pid);
     const key=boxIdx+'|||'+item;
     if(p&&g.keepTableOrderOnDelete)snapshotTableLayoutExcept(g,p,key);
     const o=g.orders.find(o=>o.nick===nick&&o.item===item&&(!!o.bind)===(!!isBind)&&(p?orderMatches(p,o):true));
-    if(o){o.qty-=1;if(o.qty<=0)g.orders=g.orders.filter(x=>x!==o);}
+    if(o){
+      if(o.all)g.orders=g.orders.filter(x=>x!==o);
+      else{o.qty-=1;if(o.qty<=0)g.orders=g.orders.filter(x=>x!==o);}
+    }
     if(p){
       if(p.pins&&p.pins[key]===nick)delete p.pins[key];
       if(p.frozenPins&&p.frozenPins[key])delete p.frozenPins[key];
@@ -1509,7 +1730,6 @@ function removeSlotUnit(gid,pid,boxIdx,itemEnc,nickEnc,isBind){
   });
   render();
 }
-
 function snapshotTableLayoutExcept(g,p,skipKey){
   const info=calcBoxes(g,p),layout={};
   info.boxes.forEach((box,boxIdx)=>{
@@ -1528,10 +1748,15 @@ function fillSlot(gid,pid,boxIdx,itemEnc){
   openModal(`<h3>第 ${boxIdx+1} 配「${esc(item)}」追加喊單</h3>
     <div class="form-group" style="margin:10px 0"><label>暱稱</label>
       <input id="fsNick" list="fsDl"><datalist id="fsDl">${nicks.map(n=>`<option value="${esc(n)}">`).join('')}</datalist></div>
-    <div style="margin-bottom:12px">
+    <div style="margin-bottom:8px">
       <label style="display:inline-flex;align-items:center;gap:4px;font-size:13px;cursor:pointer;white-space:nowrap">
         <input type="checkbox" id="fsLift">帶餘提配</label>
       <span class="muted" style="font-size:11px;margin-left:6px">把此人未成團的喊單一併提前（需在該商品已有喊單記錄）</span>
+    </div>
+    <div style="margin-bottom:12px">
+      <label style="display:inline-flex;align-items:center;gap:4px;font-size:13px;cursor:pointer;white-space:nowrap">
+        <input type="checkbox" id="fsBindLift">帶綁提配</label>
+      <span class="muted" style="font-size:11px;margin-left:6px">可提入含綁成團缺位，普通成團不會變動</span>
     </div>
     <div class="btn-row"><button class="bp" onclick="doFillSlot(${gid},${pid},${boxIdx},'${encodeURIComponent(item)}')">新增</button><button onclick="closeModal()">取消</button></div>`);
   setTimeout(()=>$('#fsNick').focus(),100);
@@ -1540,19 +1765,21 @@ function doFillSlot(gid,pid,boxIdx,itemEnc){
   const item=decodeURIComponent(itemEnc);
   const n=$('#fsNick').value.trim();
   if(!n){alert('請輸入暱稱');return;}
-  const isLift=$('#fsLift').checked;
+  const isBindLift=$('#fsBindLift').checked;
+  const isLift=$('#fsLift').checked||isBindLift;
   const g=getG(gid);
   const p=(g.boxProducts||[]).find(b=>b.id===pid);if(!p)return;
   if(isLift){
-    if(!hasUnconfirmedOrders(g,p,n)){alert(`${n} 在「${p.name}」沒有未成團的喊單，無法帶餘提配`);return;}
+    if(!hasUnconfirmedOrders(g,p,n,isBindLift)){alert(`${n} 在「${p.name}」沒有可提配的喊單，無法提配`);return;}
   }
   upG(gid,g2=>{
     const p2=(g2.boxProducts||[]).find(b=>b.id===pid);if(!p2)return;
     freezeConfirmedBoxes(g2,p2);
+    clearAutoBindOrders(g2,p2,item,1);
     if(p2.frozenPins)delete p2.frozenPins[boxIdx+'|||'+item];
-    const ex=g2.orders.find(o=>!o.bind&&o.nick===n&&o.item===item&&orderMatches(p2,o)&&(!!o.lift)===isLift);
+    const ex=g2.orders.find(o=>!o.bind&&o.nick===n&&o.item===item&&orderMatches(p2,o)&&(!!o.lift)===isLift&&(!!o.bindLift)===isBindLift);
     if(ex)ex.qty+=1;
-    else g2.orders.push({id:g2.nOid++,nick:n,item,series:'',qty:1,price:lookupPrice(g2,item,pid)||0,note:'',bpId:pid,lift:isLift,ts:Date.now()});
+    else g2.orders.push({id:g2.nOid++,nick:n,item,series:'',qty:1,price:lookupPrice(g2,item,pid)||0,note:'',bpId:pid,lift:isLift,bindLift:isBindLift,ts:Date.now()});
     if(!p2.pins)p2.pins={};
     p2.pins[boxIdx+'|||'+item]=n;
   });
@@ -1560,43 +1787,44 @@ function doFillSlot(gid,pid,boxIdx,itemEnc){
 }
 
 function showBindModal(gid,pid,boxIdx){
-  const g=getG(gid);const p=(g.boxProducts||[]).find(b=>b.id===pid);if(!p)return;
-  const info=calcBoxes(g,p);
-  const box=info.boxes[boxIdx];if(!box)return;
-  const bind=p.bindItems||{};
-  const binders=[...new Set(box.filter(s=>s.buyer&&!s.buyer.bind&&bind[s.item]).map(s=>s.buyer.nick))];
+  const g=getG(gid),p=(g.boxProducts||[]).find(b=>b.id===pid);if(!p)return;
+  const box=calcBoxes(g,p).boxes[boxIdx];if(!box)return;
+  const plan=box.bindPlan||getBoxBindPlan(p,box);
+  const bind=p.bindItems||{},order=p.bindOrder||{};
+  const candidates=box.filter(s=>s.buyer&&!s.buyer.bind&&bind[s.item]).map(s=>({nick:s.buyer.nick,item:s.item,priority:Number(order[s.item])||0})).sort((a,b)=>b.priority-a.priority||p.contents.indexOf(a.item)-p.contents.indexOf(b.item));
+  const binders=[];
+  for(const row of candidates)if(!binders.some(x=>x.nick===row.nick))binders.push(row);
   const empties=box.filter(s=>!s.buyer).map(s=>s.item);
   if(!empties.length||!binders.length)return;
   openModal(`<h3>第 ${boxIdx+1} 配 綁物</h3>
-    <p class="muted" style="margin-bottom:8px">為每個餘量款式選擇由誰綁（可留「不綁」）</p>
+    <p class="muted" style="margin-bottom:8px">已依綁序由高到低預選，可自行調整或留「不綁」。</p>
     ${empties.map(it=>{
-      const price=lookupPrice(g,it,pid);
+      const price=lookupPrice(g,it,pid),selected=plan.find(x=>x.item===it)?.nick||'';
       return `<div class="form-row"><div class="form-group"><label>${esc(it)}${price!=null?' ($'+price+')':''}</label>
-        <select class="bindSel" data-item="${esc(it)}"><option value="">不綁</option>${binders.map(n=>`<option value="${esc(n)}">${esc(n)}</option>`).join('')}</select></div></div>`;
+        <select class="bindSel" data-item="${esc(it)}"><option value="">不綁</option>${binders.map(row=>`<option value="${esc(row.nick)}" ${row.nick===selected?'selected':''}>${esc(row.nick)}（${esc(row.item)} · 綁序 ${row.priority}）</option>`).join('')}</select></div></div>`;
     }).join('')}
     <div class="btn-row"><button class="bp" onclick="applyBind(${gid},${pid},${boxIdx})">確定</button><button onclick="closeModal()">取消</button></div>`);
 }
 function applyBind(gid,pid,boxIdx){
   const picks=[...document.querySelectorAll('.bindSel')].map(s=>({item:s.dataset.item,nick:s.value})).filter(x=>x.nick);
-  if(!picks.length){closeModal();return;}
   upG(gid,g=>{
-    const product=(g.boxProducts||[]).find(b=>b.id===pid);
-    if(product)freezeConfirmedBoxes(g,product);
+    const product=(g.boxProducts||[]).find(b=>b.id===pid);if(!product)return;
+    freezeConfirmedBoxes(g,product);
+    clearAutoBindOrders(g,product,null,null,boxIdx);
     for(const x of picks){
-      if(product&&product.frozenPins)delete product.frozenPins[boxIdx+'|||'+x.item];
+      if(product.frozenPins)delete product.frozenPins[boxIdx+'|||'+x.item];
       const price=lookupPrice(g,x.item,pid)||0;
-      g.orders.push({id:g.nOid++,nick:x.nick,item:x.item,series:'',qty:1,price,note:'綁',bpId:pid,bind:true,ts:Date.now()});
+      g.orders.push({id:g.nOid++,nick:x.nick,item:x.item,series:'',qty:1,price,note:'綁',bpId:pid,bind:true,autoBind:true,bindBox:boxIdx,ts:Date.now()});
     }
   });
   closeModal();render();
 }
-
 function freezeConfirmedBoxes(g,p){
   if(!p||p.kind==='single')return;
   const info=calcBoxes(g,p);
   const frozen=p.frozenPins||{};
   info.boxes.forEach((box,boxIdx)=>{
-    if(box.status!=='成團'&&box.status!=='含綁成團')return;
+    if(box.status!=='成團')return;
     for(const slot of box){
       const key=boxIdx+'|||'+slot.item;
       frozen[key]=slot.buyer
@@ -1615,7 +1843,7 @@ function stabilizeConfirmedBoxes(g){
     const rows=[...new Set(Object.keys(frozen).map(key=>parseInt(key.split('|||')[0])).filter(Number.isFinite))];
     for(const row of rows){
       const box=info.boxes[row];
-      let valid=!!box&&(box.status==='成團'||box.status==='含綁成團');
+      let valid=!!box&&box.status==='成團';
       if(valid){
         for(const[key,pin]of Object.entries(frozen)){
           if(parseInt(key.split('|||')[0])!==row)continue;
@@ -1665,13 +1893,28 @@ function compareBoxOrders(a,b,rule,distinct){
   }
   return (a.oid||Number.MAX_SAFE_INTEGER)-(b.oid||Number.MAX_SAFE_INTEGER)||a.seq-b.seq;
 }
+function getBoxBindPlan(p,box){
+  const bind=p.bindItems||{},order=p.bindOrder||{};
+  const candidates=box.filter(s=>s.buyer&&!s.buyer.bind&&(bind[s.item]||0)>0).map(s=>({
+    nick:s.buyer.nick,binderItem:s.item,remaining:Math.max(0,parseInt(bind[s.item])||0),
+    priority:Number(order[s.item])||0,contentIndex:p.contents.indexOf(s.item)
+  })).sort((a,b)=>b.priority-a.priority||a.contentIndex-b.contentIndex);
+  const plan=[];
+  for(const slot of box.filter(s=>!s.buyer)){
+    const candidate=candidates.find(x=>x.remaining>0);
+    if(!candidate)break;
+    plan.push({item:slot.item,nick:candidate.nick,binderItem:candidate.binderItem,priority:candidate.priority});
+    candidate.remaining--;
+  }
+  return plan;
+}
 function calcBoxes(g,p){
   const demands={};
   const buyerMap={};
   for(const c of p.contents){demands[c]=0;buyerMap[c]=[];}
   const liftQty={};const liftAdd={};
   for(const o of g.orders){
-    if(o.lift&&!o.bind&&p.contents.includes(o.item)&&orderMatches(p,o)){
+    if(o.lift&&!o.all&&!o.bind&&p.contents.includes(o.item)&&orderMatches(p,o)){
       liftQty[o.nick]=(liftQty[o.nick]||0)+o.qty;
       liftAdd[o.item]=(liftAdd[o.item]||0)+o.qty;
     }
@@ -1679,9 +1922,9 @@ function calcBoxes(g,p){
   let seq=0;const distinct={};
   for(const o of g.orders){
     if(p.contents.includes(o.item)&&orderMatches(p,o)){
-      demands[o.item]=(demands[o.item]||0)+o.qty;
+      if(!o.all)demands[o.item]=(demands[o.item]||0)+o.qty;
       buyerMap[o.item]=buyerMap[o.item]||[];
-      buyerMap[o.item].push({nick:o.nick,qty:o.qty,bind:!!o.bind,fixed:o.fixed||null,fixedRank:o.fixedRank||0,fixedItems:o.fixedItems||null,isLift:!!o.lift,oid:o.id||0,seq});
+      buyerMap[o.item].push({nick:o.nick,qty:o.all?0:o.qty,all:!!o.all,bind:!!o.bind,fixed:o.fixed||null,fixedRank:o.fixedRank||0,fixedItems:o.fixedItems||null,isLift:!!o.lift,oid:o.id||0,seq});
       if(!o.bind)(distinct[o.nick]=distinct[o.nick]||new Set()).add(o.item);
     }
     seq++;
@@ -1706,8 +1949,11 @@ function calcBoxes(g,p){
     }
     const sortFn=(a,b)=>compareBoxOrders(a,b,rule,distinct);
     remaining[c]=[];
+    let allFill=Math.max(0,boxesNeeded-(demands[c]||0));
     for(const b of [...(buyerMap[c]||[])].sort(sortFn)){
-      for(let i=0;i<b.qty;i++) remaining[c].push({nick:b.nick,bind:b.bind,fixed:b.fixed,isLift:b.isLift,oid:b.oid});
+      const qty=b.all?allFill:b.qty;
+      if(b.all){b.qty=qty;allFill=0;demands[c]+=qty;}
+      for(let i=0;i<qty;i++) remaining[c].push({nick:b.nick,all:b.all,bind:b.bind,fixed:b.fixed,isLift:b.isLift,oid:b.oid});
     }
   }
   const minNoLift=p.contents.length?Math.min(...p.contents.map(c=>(demands[c]||0)-(liftAdd[c]||0))):0;
@@ -1794,17 +2040,13 @@ function calcBoxes(g,p){
       return {item:c,buyer};
     });
     const emptySlots=box.filter(s=>!s.buyer);
+    box.bindPlan=getBoxBindPlan(p,box);
     if(!emptySlots.length){
       if(box.some(s=>s.buyer&&s.buyer.bind)){box.status='含綁成團';bindComplete++;}
       else{box.status='成團';complete++;}
-    } else {
-      let bindCap=0;
-      for(const s of box){
-        if(s.buyer&&!s.buyer.bind&&bind[s.item])bindCap+=bind[s.item];
-      }
-      if(bindCap>=emptySlots.length&&bindCap>0){box.status='含綁成團';bindComplete++;}
-      else box.status='未成團';
-    }
+    } else if(box.bindPlan.length===emptySlots.length){
+      box.status='含綁成團';bindComplete++;
+    } else box.status='未成團';
     boxes.push(box);
   }
 
@@ -2272,11 +2514,14 @@ function bulkAdd(id){
     const affected=new Set();
     for(const row of parsed){
       const product=(g.boxProducts||[]).find(b=>b.contents.includes(row[1]));
-      if(product&&product.kind!=='single'&&!affected.has(product.id)){freezeConfirmedBoxes(g,product);affected.add(product.id);}
+      if(product&&product.kind!=='single'&&!affected.has(product.id)){
+        freezeConfirmedBoxes(g,product);affected.add(product.id);
+      }
     }
     for(const p of parsed){
     const bp=(g.boxProducts||[]).find(b=>b.contents.includes(p[1]));
     const bpId=bp?bp.id:null;
+    if(bp)clearAutoBindOrders(g,bp,p[1],parseInt(p[2])||1);
     const manualPrice=parseFloat(p[3])||0;
     const price=manualPrice||lookupPrice(g,p[1],bpId)||0;
     g.orders.push({id:g.nOid++,nick:p[0],item:p[1],series:'',qty:parseInt(p[2])||1,price,note:'',bpId,ts:Date.now()});c++;
@@ -2331,10 +2576,15 @@ function showSingleOrderModal(id){
       <input type="file" accept="image/*" multiple onchange="onShotFiles(this)" style="font-size:12px">
       <div id="mOShots" style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px"></div>
     </div>
-    ${isBox?`<div style="margin-bottom:10px">
+    ${isBox?`<div style="margin-bottom:8px">
       <label style="display:inline-flex;align-items:center;gap:4px;font-size:13px;cursor:pointer;white-space:nowrap">
         <input type="checkbox" id="mOLift">帶餘提配</label>
       <span class="muted" style="font-size:11px;margin-left:6px">帶走餘量，把自己未成團的喊單提前（需在該商品已有喊單記錄）</span>
+    </div>
+    <div style="margin-bottom:10px">
+      <label style="display:inline-flex;align-items:center;gap:4px;font-size:13px;cursor:pointer;white-space:nowrap">
+        <input type="checkbox" id="mOBindLift">帶綁提配</label>
+      <span class="muted" style="font-size:11px;margin-left:6px">可取代含綁成團的綁物缺位，普通成團不會變動</span>
     </div>`:''}
     <div id="mORows"></div>
     <div style="margin-bottom:10px"><button class="bs" onclick="addOrderRow()">＋ 再加一筆</button></div>
@@ -2385,7 +2635,7 @@ function addOrderRow(){
     <div class="form-group" style="flex:0 0 ${hasBps?'92':'52'}px"><label>${esc(st.fieldQty)}</label>
       <div style="display:flex;gap:2px;align-items:center">
         <input class="moQ" type="number" min="1" value="1" style="width:48px">
-        ${hasBps?`<button class="bs moAll" title="喊到該盒上限（無上限則 999）" style="padding:4px 6px;font-size:11px">all</button>`:''}
+        ${hasBps?`<button class="bs moAll" type="button" title="自動承接此款式之後新增的每一配" style="padding:4px 6px;font-size:11px;white-space:nowrap">all</button>`:''}
       </div></div>
     ${isBasic?`<div class="form-group" style="flex:0 0 70px"><label>${esc(st.fieldPrice)}</label><input class="moP" type="number" min="0" placeholder="選填" style="width:70px"></div>`
       :`<div class="form-group" style="flex:0 0 56px"><label>${esc(st.fieldPrice)}</label><span class="moPrice muted" style="display:block;padding:6px 0">—</span></div>`}
@@ -2396,12 +2646,20 @@ function addOrderRow(){
   const bpEl=div.querySelector('.moBp');
   const allBtn=div.querySelector('.moAll');
   if(allBtn){
+    const qtyInput=div.querySelector('.moQ');
+    const setAll=enabled=>{
+      allBtn.dataset.all=enabled?'1':'0';allBtn.textContent=enabled?'已 all':'all';
+      allBtn.classList.toggle('bp',enabled);qtyInput.disabled=enabled;qtyInput.style.display=enabled?'none':'';
+      if(!enabled&&(!qtyInput.value||parseInt(qtyInput.value)<1))qtyInput.value=1;
+    };
     allBtn.addEventListener('click',e=>{
       e.preventDefault();
       const p=bps.find(b=>b.id===parseInt(bpEl?.value));
       if(!p){alert('請先選商品');return;}
-      div.querySelector('.moQ').value=p.maxBoxes>0?p.maxBoxes:999;
+      if(p.kind==='single'){alert('單領商品不使用 all');return;}
+      setAll(allBtn.dataset.all!=='1');
     });
+    allBtn._setAll=setAll;
   }
   const updatePrice=()=>{
     if(isBasic)return;
@@ -2414,7 +2672,8 @@ function addOrderRow(){
   if(bpEl){
     bpEl.addEventListener('change',()=>{
       const p=bps.find(b=>b.id===parseInt(bpEl.value));
-      if(!p){itemEl.innerHTML='<option value="">— 先選商品 —</option>';itemEl.disabled=true;updatePrice();return;}
+      if(!p){itemEl.innerHTML='<option value="">— 先選商品 —</option>';itemEl.disabled=true;if(allBtn)allBtn._setAll(false);updatePrice();return;}
+      if(allBtn){allBtn.disabled=p.kind==='single';if(p.kind==='single')allBtn._setAll(false);}
       itemEl.disabled=false;
       itemEl.innerHTML='<option value="">— 選擇款式 —</option>'+p.contents.map(c=>{
         const price=p.kind==='single'?(p.unitPrice||null):bpFinalItemPrice(p,c);
@@ -2449,11 +2708,12 @@ function addMultiOrder(){
     if(!item)continue;
     const bpEl=row.querySelector('.moBp');
     const bpId=bpEl?parseInt(bpEl.value)||null:null;
-    const qty=parseInt(row.querySelector('.moQ')?.value)||1;
+    const all=row.querySelector('.moAll')?.dataset.all==='1';
+    const qty=all?1:(parseInt(row.querySelector('.moQ')?.value)||1);
     const priceEl=row.querySelector('.moP');
     const price=priceEl?parseFloat(priceEl.value)||0:lookupPrice(g,item,bpId)||0;
     const note=(row.querySelector('.moNote')?.value||'').trim();
-    entries.push({item,qty,price,note,bpId});
+    entries.push({item,qty,all,price,note,bpId});
   }
   if(!entries.length){alert(`請至少填一筆${_s.fieldItem}`);return;}
   const seen=new Set();
@@ -2462,13 +2722,19 @@ function addMultiOrder(){
     if(seen.has(key)){alert(`同一筆喊單中「${e.item}」重複了`);return;}
     seen.add(key);
     if(g.orders.some(o=>!o.bind&&o.nick===nick&&o.item===e.item&&(o.bpId||null)===(e.bpId||null))){alert(`${nick} 已經有「${e.item}」的喊單，不可重複`);return;}
+    if(e.all){
+      const owner=g.orders.find(o=>o.all&&!o.bind&&o.item===e.item&&(o.bpId||null)===(e.bpId||null));
+      if(owner){alert(`「${e.item}」已由 ${owner.nick} 設為 all`);return;}
+    }
   }
-  const isLift=!!$('#mOLift')?.checked;
+  const isBindLift=!!$('#mOBindLift')?.checked;
+  const isLift=!!$('#mOLift')?.checked||isBindLift;
+  if(isLift&&entries.some(e=>e.all)){alert('all 不可同時使用提配功能');return;}
   if(isLift){
     for(const e of entries){
       const p=e.bpId?(g.boxProducts||[]).find(b=>b.id===e.bpId):(g.boxProducts||[]).find(b=>b.contents.includes(e.item));
       if(!p){alert(`「${e.item}」未對應任何商品，無法帶餘提配`);return;}
-      if(!hasUnconfirmedOrders(g,p,nick)){alert(`${nick} 在「${p.name}」沒有未成團的喊單，無法帶餘提配`);return;}
+      if(!hasUnconfirmedOrders(g,p,nick,isBindLift)){alert(`${nick} 在「${p.name}」沒有可提配的喊單，無法提配`);return;}
     }
   }
   const contact=$('#mOContact')?.value.trim()||'';
@@ -2478,28 +2744,36 @@ function addMultiOrder(){
     const affected=new Set();
     for(const e of entries){
       const product=e.bpId?(g.boxProducts||[]).find(b=>b.id===e.bpId):(g.boxProducts||[]).find(b=>b.contents.includes(e.item));
-      if(product&&product.kind!=='single'&&!affected.has(product.id)){freezeConfirmedBoxes(g,product);affected.add(product.id);}
+      if(product&&product.kind!=='single'&&!affected.has(product.id)){
+        freezeConfirmedBoxes(g,product);affected.add(product.id);
+      }
     }
     for(const e of entries){
-      g.orders.push({id:g.nOid++,nick,item:e.item,series:'',qty:e.qty,price:e.price,note:e.note,bpId:e.bpId,lift:isLift,ts:Date.now()});
+      const product=e.bpId?(g.boxProducts||[]).find(b=>b.id===e.bpId):(g.boxProducts||[]).find(b=>b.contents.includes(e.item));
+      if(product&&product.kind!=='single')clearAutoBindOrders(g,product,e.item,e.all?null:e.qty);
+      g.orders.push({id:g.nOid++,nick,item:e.item,series:'',qty:e.qty,price:e.price,note:e.note,bpId:e.bpId,all:e.all,lift:isLift,bindLift:isBindLift,ts:Date.now()});
     }
   });
   closeModal();render();
 }
 function showEditOrderModal(gid,oid){
   const g=getG(gid),o=g.orders.find(x=>x.id===oid);if(!o)return;
+  const product=o.bpId?(g.boxProducts||[]).find(p=>p.id===o.bpId):(g.boxProducts||[]).find(p=>p.contents.includes(o.item));
+  const canAll=g.type==='box'&&product&&product.kind!=='single';
   const st=S();
   openModal(`<h3>編輯喊單</h3>
     <div class="form-row">
       <div class="form-group"><label>${esc(st.fieldNick)}</label><input id="eON" value="${esc(o.nick)}"></div>
       <div class="form-group"><label>${esc(st.fieldItem)}</label><input id="eOI" value="${esc(o.item)}"></div></div>
     <div class="form-row">
-      <div class="form-group"><label>${esc(st.fieldQty)}</label><input id="eOQ" type="number" min="1" value="${o.qty}"></div>
+      <div class="form-group"><label>${esc(st.fieldQty)}</label><input id="eOQ" type="number" min="1" value="${o.qty||1}" ${o.all?'disabled':''}>${canAll?`<label style="display:inline-flex;align-items:center;gap:4px;font-size:12px;margin-top:5px"><input type="checkbox" id="eOAll" ${o.all?'checked':''} onchange="document.getElementById('eOQ').disabled=this.checked">已 all</label>`:''}</div>
       <div class="form-group"><label>${esc(st.fieldPrice)}</label><input id="eOP" type="number" min="0" value="${o.price||''}"></div>
       <div class="form-group"><label>${esc(st.fieldNote)}</label><input id="eONote" value="${esc(o.note||'')}"></div></div>
     ${g.type==='box'?`<div style="margin-bottom:10px">
       <label style="display:inline-flex;align-items:center;gap:4px;font-size:13px;cursor:pointer;white-space:nowrap">
-        <input type="checkbox" id="eOLift" ${o.lift?'checked':''}>帶餘提配</label>
+        <input type="checkbox" id="eOLift" ${o.lift&&!o.bindLift?'checked':''}>帶餘提配</label>
+      <label style="display:inline-flex;align-items:center;gap:4px;font-size:13px;cursor:pointer;white-space:nowrap;margin-left:12px">
+        <input type="checkbox" id="eOBindLift" ${o.bindLift?'checked':''}>帶綁提配</label>
     </div>`:''}
     <div class="btn-row"><button class="bp" onclick="saveOrderEdit(${gid},${oid})">儲存</button><button onclick="closeModal()">取消</button></div>`);
 }
@@ -2508,14 +2782,23 @@ function saveOrderEdit(gid,oid){
   const newNick=$('#eON').value.trim()||o.nick;
   const newItem=$('#eOI').value.trim()||o.item;
   const newQty=parseInt($('#eOQ').value)||1;
+  const newAll=!!$('#eOAll')?.checked;
   if(newItem!==o.item||newNick!==o.nick){
     if(g.orders.some(x=>x.id!==oid&&x.nick===newNick&&x.item===newItem&&(x.bpId||null)===(o.bpId||null))){alert(`${newNick} 已經有「${newItem}」的喊單，不可重複`);return;}
   }
-  const isLift=!!$('#eOLift')?.checked;
+  if(newAll){
+    const owner=g.orders.find(x=>x.id!==oid&&x.all&&!x.bind&&x.item===newItem&&(x.bpId||null)===(o.bpId||null));
+    if(owner){alert(`「${newItem}」已由 ${owner.nick} 設為 all`);return;}
+  }
+  const isBindLift=!!$('#eOBindLift')?.checked;
+  const isLift=!!$('#eOLift')?.checked||isBindLift;
+  if(newAll&&isLift){alert('all 不可同時使用提配功能');return;}
   upG(gid,g=>{const o=g.orders.find(x=>x.id===oid);if(!o)return;
+    const product=o.bpId?(g.boxProducts||[]).find(p=>p.id===o.bpId):(g.boxProducts||[]).find(p=>p.contents.includes(o.item));
+    if(product&&product.kind!=='single'){freezeConfirmedBoxes(g,product);clearAutoBindOrders(g,product,newItem,newAll?null:(newItem===o.item?Math.max(0,newQty-o.qty):newQty));}
     o.nick=newNick;o.item=newItem;
-    o.qty=newQty;o.price=parseFloat($('#eOP').value)||0;o.note=$('#eONote').value.trim();
-    o.lift=isLift;});
+    o.qty=newAll?1:newQty;o.all=newAll;o.price=parseFloat($('#eOP').value)||0;o.note=$('#eONote').value.trim();
+    o.lift=isLift;o.bindLift=isBindLift;});
   closeModal();render();
 }
 function delOrder(gid,oid){if(!confirm('刪除？'))return;upG(gid,g=>{g.orders=g.orders.filter(o=>o.id!==oid);});render();}
@@ -2607,31 +2890,49 @@ function toggleBpKind(){
   const blindOnly=$('#bpBlindOnly');if(blindOnly)blindOnly.style.display=kind==='blind'?'block':'none';
   refreshBlindCountInputs();
 }
-function refreshBindInputs(existing){
+function refreshBindInputs(existing,existingOrder){
   const box=$('#bindInputs');if(!box)return;
-  const cur={};
+  const currentItems={},currentOrder={};
   box.querySelectorAll('.bindCb').forEach(cb=>{
-    if(cb.checked){const n=box.querySelector(`.bindN[data-c="${CSS.escape(cb.dataset.c)}"]`);cur[cb.dataset.c]=parseInt(n?.value)||1;}
+    if(!cb.checked)return;
+    const name=cb.dataset.c;
+    const count=box.querySelector(`.bindN[data-c="${CSS.escape(name)}"]`);
+    const priority=box.querySelector(`.bindP[data-c="${CSS.escape(name)}"]`);
+    currentItems[name]=parseInt(count?.value)||1;
+    currentOrder[name]=parseInt(priority?.value)||0;
   });
-  const merged={...(existing||{}),...cur};
+  const items={...(existing||{}),...currentItems};
+  const order={...(existingOrder||{}),...currentOrder};
   const ta=$('#bpC');if(!ta)return;
   const contents=ta.value.trim().split(/[\n\/,，]/).map(s=>s.trim()).filter(Boolean);
   if(!contents.length){box.innerHTML='<p class="muted" style="font-size:11px">請先輸入款式</p>';return;}
   box.innerHTML=contents.map(c=>`
-    <label style="display:inline-flex;align-items:center;gap:4px;margin:2px 10px 2px 0;font-size:12px;cursor:pointer;white-space:nowrap">
-      <input type="checkbox" class="bindCb" data-c="${esc(c)}" ${merged[c]?'checked':''}>${esc(c)}
-      <input type="number" class="bindN" data-c="${esc(c)}" value="${merged[c]||1}" min="1" style="width:44px;font-size:12px">個
-    </label>`).join('');
+    <div style="display:flex;align-items:center;gap:6px;margin:4px 0;flex-wrap:wrap;font-size:12px">
+      <label style="display:inline-flex;align-items:center;gap:4px;cursor:pointer;min-width:100px">
+        <input type="checkbox" class="bindCb" data-c="${esc(c)}" ${items[c]?'checked':''}>${esc(c)}</label>
+      <label style="display:inline-flex;align-items:center;gap:4px">需綁
+        <input type="number" class="bindN" data-c="${esc(c)}" value="${items[c]||1}" min="1" style="width:50px;font-size:12px">個</label>
+      <label style="display:inline-flex;align-items:center;gap:4px">綁序
+        <input type="number" class="bindP" data-c="${esc(c)}" value="${order[c]||0}" min="0" style="width:54px;font-size:12px"></label>
+    </div>`).join('');
 }
 function collectBindItems(contents){
   const bindItems={};
   document.querySelectorAll('#bindInputs .bindCb:checked').forEach(cb=>{
-    const c=cb.dataset.c;
-    if(!contents.includes(c))return;
-    const n=document.querySelector(`#bindInputs .bindN[data-c="${CSS.escape(c)}"]`);
-    bindItems[c]=parseInt(n?.value)||1;
+    const c=cb.dataset.c;if(!contents.includes(c))return;
+    const input=document.querySelector(`#bindInputs .bindN[data-c="${CSS.escape(c)}"]`);
+    bindItems[c]=parseInt(input?.value)||1;
   });
   return bindItems;
+}
+function collectBindOrder(contents){
+  const bindOrder={};
+  document.querySelectorAll('#bindInputs .bindCb:checked').forEach(cb=>{
+    const c=cb.dataset.c;if(!contents.includes(c))return;
+    const input=document.querySelector(`#bindInputs .bindP[data-c="${CSS.escape(c)}"]`);
+    bindOrder[c]=Math.max(0,parseInt(input?.value)||0);
+  });
+  return bindOrder;
 }
 function editBoxContentsField(p){
   return `<div class="form-group" style="margin:10px 0"><label>現有款式（可改名，順序固定）</label>
@@ -2650,7 +2951,8 @@ function syncEditBpContents(){
   const blindValues=[...document.querySelectorAll('#blindCountInputs .blindCount')].map(el=>el.value);
   const bindValues=[...document.querySelectorAll('#bindInputs .bindCb')].map(cb=>{
     const n=document.querySelector(`#bindInputs .bindN[data-c="${CSS.escape(cb.dataset.c)}"]`);
-    return {checked:cb.checked,count:parseInt(n?.value)||1};
+    const p=document.querySelector(`#bindInputs .bindP[data-c="${CSS.escape(cb.dataset.c)}"]`);
+    return {checked:cb.checked,count:parseInt(n?.value)||1,priority:Math.max(0,parseInt(p?.value)||0)};
   });
   const names=existing.map(el=>el.value.trim()||el.dataset.original);
   const appended=($('#bpAppendC')?.value||'').trim().split(/[\n\/,，]/).map(s=>s.trim()).filter(Boolean);
@@ -2663,6 +2965,7 @@ function syncEditBpContents(){
   document.querySelectorAll('#bindInputs .bindCb').forEach((cb,i)=>{
     const old=bindValues[i];if(!old)return;cb.checked=old.checked;
     const n=document.querySelector(`#bindInputs .bindN[data-c="${CSS.escape(cb.dataset.c)}"]`);if(n)n.value=old.count;
+    const p=document.querySelector(`#bindInputs .bindP[data-c="${CSS.escape(cb.dataset.c)}"]`);if(p)p.value=old.priority;
   });
   updatePriceSummary();
 }
@@ -2805,7 +3108,7 @@ function showAddBoxProductModal(gid,defaultKind){
         <div class="form-group"><label>上限盒數（0=不限）</label><input id="bpMax" type="number" min="0" value="0"></div>
         <div class="form-group"><label>每盒價格（選填）</label><input id="bpPrice" type="number" min="0"></div></div>
       ${bpSortField('fifo')}
-      <div class="form-group" style="margin:8px 0"><label>需綁設定</label>
+      <div class="form-group" style="margin:8px 0"><label>需綁設定與綁序</label><p class="muted" style="font-size:11px;margin:3px 0 6px">綁序數字越大越優先；同序時依款式順序。</p>
         <div id="bindInputs"><p class="muted" style="font-size:11px">請先輸入款式</p></div></div>
       <div id="bpBlindOnly" style="display:${isBlind?'block':'none'};margin:10px 0;padding:10px;background:#fff9df;border:1px solid #ead48e;border-radius:6px">
         <label style="display:inline-flex;align-items:center;gap:5px;font-weight:bold;cursor:pointer"><input type="checkbox" id="bpBlindOpened" onchange="toggleBlindOpenedInputs()">已拆配</label>
@@ -2855,9 +3158,10 @@ function addBoxProduct(gid){
     }
   }
   const bindItems=collectBindItems(contents);
+  const bindOrder=collectBindOrder(contents);
   const sortRule=document.querySelector('input[name=bpSort]:checked')?.value||'fifo';
   upG(gid,g=>{if(!g.boxProducts)g.boxProducts=[];
-    g.boxProducts.push({id:g.nBid++,name,kind,contents,maxBoxes:parseInt($('#bpMax').value)||0,pricePerBox:parseFloat($('#bpPrice').value)||0,priceMode,adjustPrice:priceMode==='adjust',avgPrice,itemPrices:priceMode==='average'?{}:itemPrices,bindItems,sortRule,img,surcharge,blindOpened,blindCounts,blindBaseline:[]});});
+    g.boxProducts.push({id:g.nBid++,name,kind,contents,maxBoxes:parseInt($('#bpMax').value)||0,pricePerBox:parseFloat($('#bpPrice').value)||0,priceMode,adjustPrice:priceMode==='adjust',avgPrice,itemPrices:priceMode==='average'?{}:itemPrices,bindItems,bindOrder,sortRule,img,surcharge,blindOpened,blindCounts,blindBaseline:[]});});
   closeModal();render();
 }
 function showEditBoxProductModal(gid,bid){
@@ -2891,7 +3195,7 @@ function showEditBoxProductModal(gid,bid){
         <div class="form-group"><label>上限盒數（0=不限）</label><input id="bpMax" type="number" min="0" value="${p.maxBoxes||0}"></div>
         <div class="form-group"><label>每盒價格</label><input id="bpPrice" type="number" min="0" value="${p.pricePerBox||''}"></div></div>
       ${bpSortField(p.sortRule||'fifo')}
-      <div class="form-group" style="margin:8px 0"><label>需綁設定</label>
+      <div class="form-group" style="margin:8px 0"><label>需綁設定與綁序</label><p class="muted" style="font-size:11px;margin:3px 0 6px">綁序數字越大越優先；同序時依款式順序。</p>
         <div id="bindInputs"></div></div>
       <div id="bpBlindOnly" style="display:${isBlind?'block':'none'};margin:10px 0;padding:10px;background:#fff9df;border:1px solid #ead48e;border-radius:6px">
         <label style="display:inline-flex;align-items:center;gap:5px;font-weight:bold;cursor:pointer"><input type="checkbox" id="bpBlindOpened" ${p.blindOpened?'checked':''} onchange="toggleBlindOpenedInputs()">已拆配</label>
@@ -2908,7 +3212,7 @@ function showEditBoxProductModal(gid,bid){
     </div>
     <div class="btn-row"><button class="bp" onclick="saveBoxProductEdit(${gid},${bid})">儲存</button><button onclick="closeModal()">取消</button></div>`);
   if(priceMode!=='average'&&!isSingle)refreshPriceInputs(p.itemPrices||{},priceMode);
-  if(!isSingle)refreshBindInputs(p.bindItems||{});
+  if(!isSingle)refreshBindInputs(p.bindItems||{},p.bindOrder||{});
   refreshBlindCountInputs(p.blindCounts||{});
   toggleBlindOpenedInputs();
 }
@@ -2935,6 +3239,10 @@ function renameProductContents(g,p,oldContents,newContents){
   p.frozenPins=remapProductSlotKeys(p.frozenPins,renameMap);
   p.layoutPins=remapProductSlotKeys(p.layoutPins,renameMap);
   p.rowPrices=remapProductSlotKeys(p.rowPrices,renameMap);
+  for(const field of ['bindItems','bindOrder']){
+    if(!p[field])continue;
+    const next={};for(const[key,value]of Object.entries(p[field]))next[renameMap[key]||key]=value;p[field]=next;
+  }
   if(p.blindCounts){
     const next={};for(const[key,value]of Object.entries(p.blindCounts))next[renameMap[key]||key]=value;p.blindCounts=next;
   }
@@ -2972,7 +3280,7 @@ function saveBoxProductEdit(gid,bid){
       p.name=nextName;p.kind='single';
       p.contents=nextContents;p.unitPrice=unitPrice;
       p.maxBoxes=0;p.pricePerBox=0;p.priceMode='average';p.adjustPrice=false;p.avgPrice=0;p.itemPrices={};
-      delete p.blindOpened;delete p.blindCounts;delete p.blindBaseline;delete p.blindAllocPins;delete p.rowPrices;
+      delete p.blindOpened;delete p.blindCounts;delete p.blindBaseline;delete p.blindAllocPins;delete p.rowPrices;delete p.bindItems;delete p.bindOrder;
       p.surcharge=surcharge;
       if(_bpImg!==null)p.img=_bpImg;});
     closeModal();render();return;
@@ -2991,13 +3299,14 @@ function saveBoxProductEdit(gid,bid){
     }
   }
   const bindItems=collectBindItems(contents);
+  const bindOrder=collectBindOrder(contents);
   const sortRule=document.querySelector('input[name=bpSort]:checked')?.value||'fifo';
   upG(gid,g=>{const p=(g.boxProducts||[]).find(b=>b.id===bid);if(!p)return;
     const wasBlindOpened=p.kind==='blind'&&p.blindOpened;
     if(kind==='blind'&&blindOpened&&!wasBlindOpened)p.blindBaseline=getRegularProductConfirmedOrders(g,p);
     renameProductContents(g,p,oldContents,contents);
     p.name=$('#bpN').value.trim()||p.name;p.kind=kind;p.contents=contents;p.maxBoxes=parseInt($('#bpMax').value)||0;p.pricePerBox=parseFloat($('#bpPrice').value)||0;
-    p.priceMode=priceMode;p.adjustPrice=priceMode==='adjust';p.avgPrice=avgPrice;p.itemPrices=priceMode==='average'?{}:itemPrices;p.bindItems=bindItems;p.sortRule=sortRule;p.surcharge=surcharge;
+    p.priceMode=priceMode;p.adjustPrice=priceMode==='adjust';p.avgPrice=avgPrice;p.itemPrices=priceMode==='average'?{}:itemPrices;p.bindItems=bindItems;p.bindOrder=bindOrder;p.sortRule=sortRule;p.surcharge=surcharge;
     if(kind==='blind'){
       p.blindOpened=blindOpened;p.blindCounts=blindCounts;
       if(!blindOpened){delete p.blindBaseline;delete p.blindAllocPins;}
