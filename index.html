@@ -312,6 +312,7 @@ function loadDB(){
   if(!db.teamNotes)db.teamNotes={};
   if(!db.units)db.units=[]; // 團體庫：{id,name,icon}
   if(!db.roles)db.roles=[]; // 固位角色清單
+  if(!db.roleUnits)db.roleUnits={}; // 角色所屬團體：{角色名稱:團體id}
   for(const g of db.groups){
     if(g.fixedTeam){
       for(const[nick,slots]of Object.entries(g.fixedTeam)){
@@ -320,7 +321,12 @@ function loadDB(){
       delete g.fixedTeam;changed=true;
     }
   }
-  for(const g of db.groups){
+  const knownRoles=new Set(db.roles);
+  for(const slots of Object.values(db.fixedTeam||{})){
+    for(const role of Object.keys(slots||{})){
+      if(!knownRoles.has(role)){db.roles.push(role);knownRoles.add(role);changed=true;}
+    }
+  }  for(const g of db.groups){
     if(g.type==='box'&&(g.boxProducts||[]).length){
       for(const o of g.orders){
         if(o.bpId==null){
@@ -649,6 +655,9 @@ function buildViewerDataJs(){
     teamNotes:{},
     buyers:{},
     units:db.units||[],
+    unitNid:db.unitNid||1,
+    roles:db.roles||[],
+    roleUnits:db.roleUnits||{},
     publishedAt:new Date().toLocaleString('zh-TW')
   };
   return 'window.VIEWER_DB='+JSON.stringify(pub)+
@@ -703,6 +712,15 @@ function importFullBackup(input){
   };
   reader.readAsText(f);
 }
+function preserveMissingAdminLibraries(incoming){
+  const current=loadDB();
+  for(const key of ['roles','roleUnits','units','unitNid']){
+    if(!Object.prototype.hasOwnProperty.call(incoming,key)&&Object.prototype.hasOwnProperty.call(current,key)){
+      incoming[key]=JSON.parse(JSON.stringify(current[key]));
+    }
+  }
+  return incoming;
+}
 function importViewerData(input){
   const f=input.files&&input.files[0];
   input.value='';
@@ -713,7 +731,7 @@ function importViewerData(input){
       const win={};
       new Function('window',String(e.target.result))(win);
       if(!win.VIEWER_DB||!Array.isArray(win.VIEWER_DB.groups))throw new Error('找不到 VIEWER_DB');
-      const db=JSON.parse(JSON.stringify(win.VIEWER_DB));
+      const db=preserveMissingAdminLibraries(JSON.parse(JSON.stringify(win.VIEWER_DB)));
       if(!confirm(`匯入後會覆蓋此裝置目前管理資料。\n將匯入 ${db.groups.length} 個團，確定繼續？`))return;
       localStorage.setItem('gp_db2',JSON.stringify(db));
       if(win.VIEWER_SETTINGS)localStorage.setItem('gp_settings',JSON.stringify(win.VIEWER_SETTINGS));
@@ -873,7 +891,8 @@ async function githubPullData(){
     const raw=await ghFetch(c,c.path,{query:'?ref='+encodeURIComponent(c.branch)+'&t='+Date.now(),accept:'application/vnd.github.raw'}).then(r=>r.text());
     const win=parseViewerDataText(raw);
     if(!confirm('讀取到 '+win.VIEWER_DB.groups.length+' 個團。\n匯入後會覆蓋這台裝置目前的管理資料，確定繼續？'))return;
-    localStorage.setItem('gp_db2',JSON.stringify(win.VIEWER_DB));
+    const importedDb=preserveMissingAdminLibraries(JSON.parse(JSON.stringify(win.VIEWER_DB)));
+    localStorage.setItem('gp_db2',JSON.stringify(importedDb));
     if(win.VIEWER_SETTINGS)localStorage.setItem('gp_settings',JSON.stringify(win.VIEWER_SETTINGS));
     if(win.VIEWER_TEXTOV)localStorage.setItem('gp_text_overrides',JSON.stringify(win.VIEWER_TEXTOV));
     _vdb=null;view='home';gid=null;tab='orders';sNick='';sItem='';homeFilter='';
@@ -930,26 +949,67 @@ function ftMemberBlock(nick,slots){
     ${Object.entries(slots).map(([s,pos])=>ftSlotChip(s,pos)).join('')}
     </div>
     <div style="display:flex;gap:4px;margin-top:6px;align-items:center;flex-wrap:wrap">
-      <select class="ftAddStyle" style="font-size:12px;min-width:110px">${getRoles().length?getRoles().map(r=>`<option value="${esc(r)}">${esc(r)}</option>`).join(''):'<option value="">（請先建立角色清單）</option>'}</select>
+      <select class="ftAddStyle" style="font-size:12px;min-width:140px">${roleSelectOptions()}</select>
       <select class="ftAddPos" style="font-size:12px">${ftPosOptions('pick')}</select>
       <button class="bs" onclick="ftAddSlot(this)">＋ 加角色位</button>
     </div>
     <div style="margin-top:6px"><input class="ftNote" value="${esc(_ftNotes[nick]||'')}" placeholder="備註" style="width:100%;font-size:12px"></div></div>`;
 }
-// 固位角色清單（跨團共用，存於 db.roles）：固團成員的角色位只能從這裡選
+// 固位角色清單（跨團共用，存於 db.roles；所屬團體存於 db.roleUnits）
 function getRoles(){return loadDB().roles||[];}
+function getRoleUnitId(role){
+  const id=parseInt((loadDB().roleUnits||{})[role]);
+  return Number.isFinite(id)?id:null;
+}
+function roleSelectOptions(selected){
+  const db=loadDB(),roles=db.roles||[],units=db.units||[],map=db.roleUnits||{};
+  if(!roles.length)return '<option value="">（請先建立角色清單）</option>';
+  let h='';
+  for(const u of units){
+    const list=roles.filter(r=>parseInt(map[r])===u.id);
+    if(list.length)h+=`<optgroup label="${esc(u.name)}">${list.map(r=>`<option value="${esc(r)}" ${r===selected?'selected':''}>${esc(r)}</option>`).join('')}</optgroup>`;
+  }
+  const other=roles.filter(r=>!units.some(u=>u.id===parseInt(map[r])));
+  if(other.length)h+=`<optgroup label="未分類">${other.map(r=>`<option value="${esc(r)}" ${r===selected?'selected':''}>${esc(r)}</option>`).join('')}</optgroup>`;
+  return h;
+}
 function roleChip(r){
-  return `<span style="display:inline-flex;align-items:center;gap:5px;background:#fff;border:1px solid var(--line);border-radius:14px;padding:3px 10px;font-size:12px">${esc(r)}
+  const db=loadDB(),unitId=parseInt((db.roleUnits||{})[r]);
+  const unitOptions=(db.units||[]).map(u=>`<option value="${u.id}" ${u.id===unitId?'selected':''}>${esc(u.name)}</option>`).join('');
+  return `<span style="display:inline-flex;align-items:center;gap:5px;background:#fff;border:1px solid var(--line);border-radius:8px;padding:3px 6px;font-size:12px">${esc(r)}
+    <select style="font-size:11px;max-width:120px" onchange="setRoleUnit(decodeURIComponent('${encodeURIComponent(r)}'),this.value)"><option value="">未分類</option>${unitOptions}</select>
     <span onclick="delRole(decodeURIComponent('${encodeURIComponent(r)}'))" style="cursor:pointer;color:#a32d2d;font-weight:bold" title="從清單移除">✕</span></span>`;
 }
+function setRoleUnit(role,value){
+  const db=loadDB();if(!db.roleUnits)db.roleUnits={};
+  const unitId=parseInt(value);
+  if(Number.isFinite(unitId))db.roleUnits[role]=unitId;
+  else delete db.roleUnits[role];
+  saveDB(db);
+  const list=$('#roleList');if(list)list.innerHTML=roleListHtml();
+}function roleListHtml(){
+  const db=loadDB(),roles=db.roles||[],units=db.units||[],map=db.roleUnits||{};
+  if(!roles.length)return '<span class="muted">尚未新增角色</span>';
+  let h='';
+  for(const u of units){
+    const list=roles.filter(r=>parseInt(map[r])===u.id);
+    if(!list.length)continue;
+    h+=`<div style="width:100%;font-weight:bold;font-size:12px;color:#8f5367;margin-top:4px">${esc(u.name)}</div><div style="display:flex;flex-wrap:wrap;gap:6px">${list.map(roleChip).join('')}</div>`;
+  }
+  const other=roles.filter(r=>!units.some(u=>u.id===parseInt(map[r])));
+  if(other.length)h+=`<div style="width:100%;font-weight:bold;font-size:12px;color:#8f5367;margin-top:4px">未分類</div><div style="display:flex;flex-wrap:wrap;gap:6px">${other.map(roleChip).join('')}</div>`;
+  return h;
+}
 function showRolesModal(){
-  const roles=getRoles();
+  const units=getUnits();
   openModal(`<h3>固位角色清單</h3>
-    <p class="muted" style="margin-bottom:10px">固團成員的角色位只能從這份清單選擇。</p>
-    <div style="display:flex;gap:6px;margin-bottom:10px">
-      <input id="roleName" placeholder="角色名稱" style="flex:1" onkeydown="if(event.key==='Enter')addRole()">
-      <button class="bs bp" onclick="addRole()">新增</button></div>
-    <div id="roleList" style="display:flex;flex-wrap:wrap;gap:6px">${roles.map(roleChip).join('')||'<span class="muted">尚未新增角色</span>'}</div>
+    <p class="muted" style="margin-bottom:10px">角色與所屬團體會一起保存到 data.js，可在不同裝置繼續管理。</p>
+    <div style="display:flex;gap:6px;margin-bottom:10px;align-items:flex-end;flex-wrap:wrap">
+      <div class="form-group" style="flex:1;min-width:130px"><label>角色名稱</label><input id="roleName" placeholder="角色名稱" onkeydown="if(event.key==='Enter')addRole()"></div>
+      <div class="form-group" style="min-width:150px"><label>團體</label><select id="roleUnit"><option value="">未分類</option>${units.map(u=>`<option value="${u.id}">${esc(u.name)}</option>`).join('')}</select></div>
+      <button class="bs bp" onclick="addRole()">新增角色</button>
+      <button class="bs" onclick="showUnitsModal(true)">新增團體</button></div>
+    <div id="roleList" style="display:flex;flex-direction:column;gap:6px">${roleListHtml()}</div>
     <div class="btn-row" style="margin-top:14px"><button onclick="showFixedTeamModal(true)">返回固團成員</button></div>`);
   setTimeout(()=>$('#roleName')?.focus(),100);
 }
@@ -958,18 +1018,22 @@ function addRole(){
   if(!name){alert('請輸入角色名稱');return;}
   const db=loadDB();
   if(!db.roles)db.roles=[];
+  if(!db.roleUnits)db.roleUnits={};
   if(db.roles.includes(name)){alert('角色已存在');return;}
   db.roles.push(name);
+  const unitId=parseInt($('#roleUnit')?.value);
+  if(Number.isFinite(unitId))db.roleUnits[name]=unitId;
   saveDB(db);
-  $('#roleList').innerHTML=db.roles.map(roleChip).join('');
+  $('#roleList').innerHTML=roleListHtml();
   $('#roleName').value='';
 }
 function delRole(name){
   if(!confirm(`從清單移除「${name}」？\n成員已設定的角色位不會被刪除。`))return;
   const db=loadDB();
   db.roles=(db.roles||[]).filter(r=>r!==name);
+  if(db.roleUnits)delete db.roleUnits[name];
   saveDB(db);
-  $('#roleList').innerHTML=db.roles.map(roleChip).join('')||'<span class="muted">尚未新增角色</span>';
+  $('#roleList').innerHTML=roleListHtml();
 }
 function ftAddSlot(btn){
   const member=btn.closest('.ft-member');
@@ -1025,38 +1089,43 @@ function ftExpand(btn){
   row.outerHTML=ftMemberBlock(nick,_ftTeam[nick]||{});
 }
 let _ftView='style';
+function ftStyleCard(s,entries){
+  const slots=entries.filter(x=>x.pos.t==='slot').sort((a,b)=>(a.pos.r||1)-(b.pos.r||1));
+  const picks=entries.filter(x=>x.pos.t==='pick');
+  const slotChips=slots.map(x=>{
+    const passN=(_ftPass[x.nick]||{})[s]||0;
+    const passBadge=passN>0?` <span style="color:${passN>=2?'#a32d2d':'#c08a3e'};font-weight:bold">${passN>=2?'注意 ':''}pass${passN}</span>`:'';
+    return `<span style="display:inline-flex;align-items:center;gap:4px;background:#fff;border:1px solid ${passN>=2?'#f3b8c4':'#e0ddf5'};border-radius:12px;padding:2px 8px 2px 3px;font-size:12px;white-space:nowrap">
+      <span style="background:#534ab7;color:#fff;border-radius:50%;width:17px;height:17px;display:inline-flex;align-items:center;justify-content:center;font-size:10px;font-weight:bold;flex-shrink:0">${x.pos.r||1}</span>${esc(x.nick)}${passBadge}</span>`;
+  }).join('');
+  const pickChips=picks.map(x=>`<span style="display:inline-flex;align-items:center;background:#fff;border:1px solid #cfe5e2;border-radius:12px;padding:2px 8px;font-size:12px;white-space:nowrap">${esc(x.nick)}</span>`).join('');
+  return `<div style="background:#fef7fa;border-radius:8px;padding:10px;border:1px solid #f3dce5">
+    <div style="font-weight:bold;font-size:14px;margin-bottom:8px;padding-bottom:5px;border-bottom:2px solid #d8b44a">${esc(s)}</div>
+    <div style="display:flex;gap:6px;align-items:flex-start;margin-bottom:6px">
+      <span style="font-size:11px;color:#534ab7;font-weight:bold;padding:2px 0;white-space:nowrap">固位</span>
+      <div style="display:flex;flex-wrap:wrap;gap:4px">${slotChips||'<span class="muted" style="font-size:12px;padding:2px 0">—</span>'}</div></div>
+    <div style="display:flex;gap:6px;align-items:flex-start">
+      <span style="font-size:11px;color:#2a7a6e;font-weight:bold;padding:2px 0;white-space:nowrap">撿漏</span>
+      <div style="display:flex;flex-wrap:wrap;gap:4px">${pickChips||'<span class="muted" style="font-size:12px;padding:2px 0">—</span>'}</div></div>
+  </div>`;
+}
 function ftStyleView(){
   const byStyle={};
   for(const[nick,slots]of Object.entries(_ftTeam)){
-    for(const[s,pos]of Object.entries(slots||{})){
-      (byStyle[s]=byStyle[s]||[]).push({nick,pos});
-    }
+    for(const[s,pos]of Object.entries(slots||{}))(byStyle[s]=byStyle[s]||[]).push({nick,pos});
   }
-  const keys=Object.keys(byStyle).sort();
-  if(!keys.length)return '<div class="empty">尚無角色位設定</div>';
-  let h=`<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:10px">`;
-  for(const s of keys){
-    const slots=byStyle[s].filter(x=>x.pos.t==='slot').sort((a,b)=>(a.pos.r||1)-(b.pos.r||1));
-    const picks=byStyle[s].filter(x=>x.pos.t==='pick');
-    const slotChips=slots.map(x=>{
-      const passN=(_ftPass[x.nick]||{})[s]||0;
-      const passBadge=passN>0?` <span style="color:${passN>=2?'#a32d2d':'#c08a3e'};font-weight:bold">${passN>=2?'⚠':''}pass${passN}</span>`:'';
-      return `<span style="display:inline-flex;align-items:center;gap:4px;background:#fff;border:1px solid ${passN>=2?'#f3b8c4':'#e0ddf5'};border-radius:12px;padding:2px 8px 2px 3px;font-size:12px;white-space:nowrap">
-      <span style="background:#534ab7;color:#fff;border-radius:50%;width:17px;height:17px;display:inline-flex;align-items:center;justify-content:center;font-size:10px;font-weight:bold;flex-shrink:0">${x.pos.r||1}</span>${esc(x.nick)}${passBadge}</span>`;
-    }).join('');
-    const pickChips=picks.map(x=>`<span style="display:inline-flex;align-items:center;background:#fff;border:1px solid #cfe5e2;border-radius:12px;padding:2px 8px;font-size:12px;white-space:nowrap">${esc(x.nick)}</span>`).join('');
-    h+=`<div style="background:#fef7fa;border-radius:10px;padding:10px;border:1px solid #fdf1f6">
-      <div style="font-weight:bold;font-size:14px;margin-bottom:8px;padding-bottom:5px;border-bottom:2px solid #534ab7">${esc(s)}</div>
-      <div style="display:flex;gap:6px;align-items:flex-start;margin-bottom:6px">
-        <span style="font-size:11px;color:#534ab7;font-weight:bold;padding:2px 0;white-space:nowrap">📌 固位</span>
-        <div style="display:flex;flex-wrap:wrap;gap:4px">${slotChips||'<span class="muted" style="font-size:12px;padding:2px 0">—</span>'}</div></div>
-      <div style="display:flex;gap:6px;align-items:flex-start">
-        <span style="font-size:11px;color:#2a7a6e;font-weight:bold;padding:2px 0;white-space:nowrap">🧺 撿漏</span>
-        <div style="display:flex;flex-wrap:wrap;gap:4px">${pickChips||'<span class="muted" style="font-size:12px;padding:2px 0">—</span>'}</div></div>
-    </div>`;
-  }
-  h+='</div>';
-  return h;
+  const styles=Object.keys(byStyle);
+  if(!styles.length)return '<div class="empty">尚無角色位設定</div>';
+  const db=loadDB(),units=db.units||[],map=db.roleUnits||{};
+  const sections=units.map(u=>({id:u.id,name:u.name,icon:u.icon||'',styles:styles.filter(s=>parseInt(map[s])===u.id)})).filter(x=>x.styles.length);
+  const other=styles.filter(s=>!units.some(u=>u.id===parseInt(map[s])));
+  if(other.length)sections.push({id:null,name:'未分類',icon:'',styles:other});
+  return sections.map(section=>`<section style="margin-bottom:18px">
+    <div style="display:flex;align-items:center;gap:7px;font-size:16px;font-weight:bold;color:#7d4357;margin-bottom:8px;padding-bottom:6px;border-bottom:1px solid var(--line)">
+      ${section.icon?`<img src="${section.icon}" style="width:24px;height:24px;object-fit:cover;border-radius:5px">`:''}${esc(section.name)}</div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:10px">
+      ${section.styles.sort((a,b)=>a.localeCompare(b,'zh-Hant')).map(s=>ftStyleCard(s,byStyle[s])).join('')}
+    </div></section>`).join('');
 }
 function switchFtView(v){_ftView=v;showFixedTeamModal(true);}
 function showFixedTeamModal(keepTeam){
@@ -1122,7 +1191,7 @@ function saveFixedTeam(){
 }
 
 // ── 團體庫（跨團共用，存於 db.units：{id,name,icon}） ──
-let _unitIconTmp=null;
+let _unitIconTmp=null,_unitsReturnToRoles=false;
 function getUnits(){return loadDB().units||[];}
 function onUnitIconChange(input){
   imgFileToData(input.files[0],d=>{
@@ -1143,7 +1212,8 @@ document.addEventListener('paste',e=>{
     }
   }
 });
-function showUnitsModal(){
+function showUnitsModal(returnToRoles){
+  _unitsReturnToRoles=!!returnToRoles;
   const units=getUnits();
   _unitIconTmp=null;
   let h=`<h3>團體管理</h3>
@@ -1159,7 +1229,7 @@ function showUnitsModal(){
     </div>
     <div id="unitList" style="display:flex;flex-wrap:wrap;gap:8px">`;
   h+=units.map(u=>unitChip(u)).join('')||'<span class="muted">尚未建立團體</span>';
-  h+=`</div><div class="btn-row" style="margin-top:14px"><button onclick="closeModal()">關閉</button></div>`;
+  h+=`</div><div class="btn-row" style="margin-top:14px"><button onclick="${_unitsReturnToRoles?'showRolesModal()':'closeModal()'}">${_unitsReturnToRoles?'返回角色清單':'關閉'}</button></div>`;
   openModal(h);
 }
 function unitChip(u){
@@ -1185,6 +1255,7 @@ function delUnit(id){
   const db=loadDB();
   db.units=(db.units||[]).filter(u=>u.id!==id);
   for(const g of db.groups){if(g.unitIds)g.unitIds=g.unitIds.filter(x=>x!==id);}
+  for(const role of Object.keys(db.roleUnits||{}))if(parseInt(db.roleUnits[role])===id)delete db.roleUnits[role];
   saveDB(db);
   $('#unitList').innerHTML=db.units.map(u=>unitChip(u)).join('')||'<span class="muted">尚未建立團體</span>';
 }
@@ -1564,6 +1635,36 @@ function stabilizeConfirmedBoxes(g){
   }
 }
 
+function boxOrderPriority(g,item,e,team){
+  let type=null,rank=0;
+  const member=team[e.nick];
+  const pos=member?member[item]:null;
+  if(pos){type=pos.t;rank=pos.r||0;}
+  else if(e.fixed){
+    const applies=e.fixedItems&&e.fixedItems.length?e.fixedItems.includes(item):true;
+    if(applies){type=e.fixed==='slot'?'slot':'pick';rank=e.fixedRank||0;}
+    else type='member';
+  }else if(member)type='member';
+  const fixedActive=!g.fixEnded||(g.fixEndAt!=null&&e.oid<g.fixEndAt);
+  let cls=3;
+  if(e.bind)cls=5;
+  else if(type==='slot')cls=fixedActive?0:1;
+  else if(type==='pick')cls=1;
+  else if(type==='member')cls=2;
+  return {cls,rank};
+}
+function compareBoxOrders(a,b,rule,distinct){
+  if(a._cls!==b._cls)return a._cls-b._cls;
+  if(a._cls===0&&a._rank!==b._rank)return a._rank-b._rank;
+  if(a._cls===3){
+    if(rule==='single'&&b.qty!==a.qty)return b.qty-a.qty;
+    if(rule==='easy'){
+      const da=distinct[a.nick]?.size||0,db=distinct[b.nick]?.size||0;
+      if(db!==da)return db-da;
+    }
+  }
+  return (a.oid||Number.MAX_SAFE_INTEGER)-(b.oid||Number.MAX_SAFE_INTEGER)||a.seq-b.seq;
+}
 function calcBoxes(g,p){
   const demands={};
   const buyerMap={};
@@ -1595,37 +1696,15 @@ function calcBoxes(g,p){
 
   const rule=p.sortRule||'fifo';
   const team=getTeam();
-  const slotActive=e=>!g.fixEnded||(g.fixEndAt!=null&&e.oid<g.fixEndAt);
   const boxes=[];
   const remaining={};
   for(const c of p.contents){
     for(const e of (buyerMap[c]||[])){
-      let type=null,rank=0;
-      const m=team[e.nick];
-      const pos=m?m[c]:null;
-      if(pos){type=pos.t;rank=pos.r||0;}
-      else if(e.fixed){
-        const applies=e.fixedItems&&e.fixedItems.length?e.fixedItems.includes(c):true;
-        if(applies){type=e.fixed==='slot'?'slot':'pick';rank=e.fixedRank||0;}
-        else type='member';
-      }
-      else if(m)type='member'; // 名單成員但該款無位
-      if(e.bind)e._cls=5;
-      else if(type==='slot')e._cls=slotActive(e)?0:1;
-      else if(type==='pick')e._cls=1;
-      else if(type==='member')e._cls=2;
-      else e._cls=3;
-      e._rank=rank;
+      const priority=boxOrderPriority(g,c,e,team);
+      e._cls=priority.cls;
+      e._rank=priority.rank;
     }
-    const sortFn=(a,b)=>{
-      if(a._cls!==b._cls)return a._cls-b._cls;
-      if(a._cls===0&&(a._rank||999)!==(b._rank||999))return(a._rank||999)-(b._rank||999);
-      if(a._cls===3){
-        if(rule==='single'&&b.qty!==a.qty)return b.qty-a.qty;
-        if(rule==='easy'){const da=distinct[a.nick]?.size||0,db=distinct[b.nick]?.size||0;if(db!==da)return db-da;}
-      }
-      return a.seq-b.seq;
-    };
+    const sortFn=(a,b)=>compareBoxOrders(a,b,rule,distinct);
     remaining[c]=[];
     for(const b of [...(buyerMap[c]||[])].sort(sortFn)){
       for(let i=0;i<b.qty;i++) remaining[c].push({nick:b.nick,bind:b.bind,fixed:b.fixed,isLift:b.isLift,oid:b.oid});
