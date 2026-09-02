@@ -306,6 +306,10 @@ function inferMemberJoinedAt(db,nick){
 function releaseLegacyBindLocks(db){
   let changed=false;
   for(const g of db?.groups||[]){
+    for(const o of g.orders||[]){
+      if(o.bind&&o.autoBind==null){o.autoBind=true;changed=true;}
+      if(o.bindLift){o.lift=true;delete o.bindLift;changed=true;}
+    }
     for(const p of g.boxProducts||[]){
       const frozen=p.frozenPins;if(!frozen)continue;
       const releaseRows=new Set();
@@ -363,7 +367,6 @@ function loadDB(){
   }  for(const g of db.groups){
     if(g.type==='box'&&(g.boxProducts||[]).length){
       for(const o of g.orders){
-        if(o.bind&&o.autoBind==null){o.autoBind=true;changed=true;}
         if(o.bpId==null){
           const bp=g.boxProducts.find(p=>p.contents.includes(o.item));
           if(bp){o.bpId=bp.id;changed=true;}
@@ -582,7 +585,7 @@ function renderOrdersTab(g){
       if(isBox){const bp=(g.boxProducts||[]).find(p=>orderMatches(p,o)&&p.contents.includes(o.item));boxName=bp?bp.name:'';}
       const pr=effPrice(g,o);
       const isTeam=!!_team[o.nick];
-      const fxBadge=(!isTeam&&o.fixed==='slot'?` <span class="badge b-purple">固${o.fixedRank||''}</span>`:!isTeam&&o.fixed==='pick'?' <span class="badge b-teal">撿</span>':'')+(o.bindLift?' <span class="badge b-amber">綁提</span>':o.lift?' <span class="badge b-amber">提</span>':'');
+      const fxBadge=(!isTeam&&o.fixed==='slot'?` <span class="badge b-purple">固${o.fixedRank||''}</span>`:!isTeam&&o.fixed==='pick'?' <span class="badge b-teal">撿</span>':'')+(o.lift?' <span class="badge b-amber">提</span>':'');
       h+=`<tr><td>${isTeam?`<span style="color:#a32d2d;font-weight:bold">${esc(o.nick)}</span>`:esc(o.nick)}${fxBadge}</td><td>${esc(o.item)}</td>
         ${isBox?`<td>${boxName?`<span class="badge b-coral">${esc(boxName)}</span>`:`<span class="muted">未對應</span>`}</td>`:''}
         <td>${o.all?'<span class="badge b-green">已 all</span>':o.qty}</td><td>${pr?'$'+pr:'-'}</td><td>${o.all?'<span class="muted">依成團數</span>':pr?'$'+(o.qty*pr):'-'}</td>
@@ -1600,9 +1603,9 @@ function bpDetailHtml(g,p){
     <div style="display:flex;gap:16px;font-size:13px;margin-bottom:10px;flex-wrap:wrap">
       <span>已成 <strong>${info.complete}</strong> 配</span>
       ${info.bindComplete?`<span style="color:#534ab7">含綁成團 <strong>${info.bindComplete}</strong> 配</span>`:''}
-      <span>開 <strong>${info.boxesNeeded}</strong> 盒</span>
+      ${p.maxBoxes?`<span>開 <strong>${info.boxesNeeded}</strong> 盒</span>`:'<span>有幾開幾</span>'}
       <span>餘量 <strong style="color:${info.surplus?'#a32d2d':'#3b6d11'}">${info.surplus}</strong> 個</span>
-      <span class="muted">上限 ${p.maxBoxes||'不限'} 盒${p.pricePerBox?' · $'+p.pricePerBox+'/盒':''}</span>
+      ${p.maxBoxes||p.pricePerBox?`<span class="muted">${p.maxBoxes?'上限 '+p.maxBoxes+' 盒':''}${p.pricePerBox?(p.maxBoxes?' · ':'')+'$'+p.pricePerBox+'/盒':''}</span>`:''}
     </div>`;
 
   h+=`<div style="overflow-x:auto"><table><thead><tr><th>款式</th><th>單價</th><th>需求</th><th>供給 (${info.boxesNeeded}盒)</th><th>狀態</th><th>喊單者</th></tr></thead><tbody>`;
@@ -1617,7 +1620,7 @@ function bpDetailHtml(g,p){
     else if(surplus>0) st=`<span class="badge b-amber">餘 ${surplus}</span>`;
     else st='<span class="badge b-green">已無</span>';
     h+=`<tr><td>${esc(c)}</td><td>${itemPrice!=null?'$'+itemPrice:'-'}</td><td>${demand}</td><td>${supply}</td><td>${st}</td>
-      <td class="muted">${buyers.map(b=>`${esc(b.nick)}${b.bind?'(綁)':''}${b.all?'（已 all）':'×'+b.qty}`).join(', ')||'-'}</td></tr>`;
+      <td class="muted">${buyers.filter(b=>!b.all||b.qty>0).map(b=>`${esc(b.nick)}${b.bind?'(綁)':''}${b.all?'（已 all）':'×'+b.qty}`).join(', ')||'-'}</td></tr>`;
   }
   h+=`</tbody></table></div>`;
 
@@ -1686,8 +1689,8 @@ function resetBoxRowPrices(gid,pid,boxIdx){
   closeModal();render();
 }
 
-function hasUnconfirmedOrders(g,p,nick,includeBindComplete){
-  const source=includeBindComplete?{...g,orders:g.orders.filter(o=>!(o.bind&&o.autoBind&&orderMatches(p,o)))}:g;
+function hasUnconfirmedOrders(g,p,nick){
+  const source={...g,orders:g.orders.filter(o=>!(o.bind&&o.autoBind&&orderMatches(p,o)))};
   const info=calcBoxes(source,p);
   for(const box of info.boxes){
     if(box.every(s=>s.buyer))continue;
@@ -1748,15 +1751,10 @@ function fillSlot(gid,pid,boxIdx,itemEnc){
   openModal(`<h3>第 ${boxIdx+1} 配「${esc(item)}」追加喊單</h3>
     <div class="form-group" style="margin:10px 0"><label>暱稱</label>
       <input id="fsNick" list="fsDl"><datalist id="fsDl">${nicks.map(n=>`<option value="${esc(n)}">`).join('')}</datalist></div>
-    <div style="margin-bottom:8px">
-      <label style="display:inline-flex;align-items:center;gap:4px;font-size:13px;cursor:pointer;white-space:nowrap">
-        <input type="checkbox" id="fsLift">帶餘提配</label>
-      <span class="muted" style="font-size:11px;margin-left:6px">把此人未成團的喊單一併提前（需在該商品已有喊單記錄）</span>
-    </div>
     <div style="margin-bottom:12px">
       <label style="display:inline-flex;align-items:center;gap:4px;font-size:13px;cursor:pointer;white-space:nowrap">
-        <input type="checkbox" id="fsBindLift">帶綁提配</label>
-      <span class="muted" style="font-size:11px;margin-left:6px">可提入含綁成團缺位，普通成團不會變動</span>
+        <input type="checkbox" id="fsLift">帶餘提配</label>
+      <span class="muted" style="font-size:11px;margin-left:6px">提前此人的未成團喊單，也可取代含綁缺位；普通成團不會變動</span>
     </div>
     <div class="btn-row"><button class="bp" onclick="doFillSlot(${gid},${pid},${boxIdx},'${encodeURIComponent(item)}')">新增</button><button onclick="closeModal()">取消</button></div>`);
   setTimeout(()=>$('#fsNick').focus(),100);
@@ -1765,21 +1763,20 @@ function doFillSlot(gid,pid,boxIdx,itemEnc){
   const item=decodeURIComponent(itemEnc);
   const n=$('#fsNick').value.trim();
   if(!n){alert('請輸入暱稱');return;}
-  const isBindLift=$('#fsBindLift').checked;
-  const isLift=$('#fsLift').checked||isBindLift;
+  const isLift=$('#fsLift').checked;
   const g=getG(gid);
   const p=(g.boxProducts||[]).find(b=>b.id===pid);if(!p)return;
   if(isLift){
-    if(!hasUnconfirmedOrders(g,p,n,isBindLift)){alert(`${n} 在「${p.name}」沒有可提配的喊單，無法提配`);return;}
+    if(!hasUnconfirmedOrders(g,p,n)){alert(`${n} 在「${p.name}」沒有可提配的喊單，無法提配`);return;}
   }
   upG(gid,g2=>{
     const p2=(g2.boxProducts||[]).find(b=>b.id===pid);if(!p2)return;
     freezeConfirmedBoxes(g2,p2);
     clearAutoBindOrders(g2,p2,item,1);
     if(p2.frozenPins)delete p2.frozenPins[boxIdx+'|||'+item];
-    const ex=g2.orders.find(o=>!o.bind&&o.nick===n&&o.item===item&&orderMatches(p2,o)&&(!!o.lift)===isLift&&(!!o.bindLift)===isBindLift);
+    const ex=g2.orders.find(o=>!o.bind&&o.nick===n&&o.item===item&&orderMatches(p2,o)&&(!!o.lift)===isLift);
     if(ex)ex.qty+=1;
-    else g2.orders.push({id:g2.nOid++,nick:n,item,series:'',qty:1,price:lookupPrice(g2,item,pid)||0,note:'',bpId:pid,lift:isLift,bindLift:isBindLift,ts:Date.now()});
+    else g2.orders.push({id:g2.nOid++,nick:n,item,series:'',qty:1,price:lookupPrice(g2,item,pid)||0,note:'',bpId:pid,lift:isLift,ts:Date.now()});
     if(!p2.pins)p2.pins={};
     p2.pins[boxIdx+'|||'+item]=n;
   });
@@ -1914,7 +1911,7 @@ function calcBoxes(g,p){
   for(const c of p.contents){demands[c]=0;buyerMap[c]=[];}
   const liftQty={};const liftAdd={};
   for(const o of g.orders){
-    if(o.lift&&!o.all&&!o.bind&&p.contents.includes(o.item)&&orderMatches(p,o)){
+    if(o.lift&&!o.bind&&p.contents.includes(o.item)&&orderMatches(p,o)){
       liftQty[o.nick]=(liftQty[o.nick]||0)+o.qty;
       liftAdd[o.item]=(liftAdd[o.item]||0)+o.qty;
     }
@@ -1948,12 +1945,26 @@ function calcBoxes(g,p){
       e._rank=priority.rank;
     }
     const sortFn=(a,b)=>compareBoxOrders(a,b,rule,distinct);
+    const sorted=[...(buyerMap[c]||[])].sort(sortFn);
+    const allWinner=sorted.filter(b=>b.all).sort((a,b)=>{
+      if(a.isLift!==b.isLift)return a.isLift?-1:1;
+      const aTeam=!!team[a.nick],bTeam=!!team[b.nick];
+      if(aTeam!==bTeam)return aTeam?-1:1;
+      return aTeam?sortFn(a,b):(a.oid||Number.MAX_SAFE_INTEGER)-(b.oid||Number.MAX_SAFE_INTEGER)||a.seq-b.seq;
+    })[0]||null;
     remaining[c]=[];
-    let allFill=Math.max(0,boxesNeeded-(demands[c]||0));
-    for(const b of [...(buyerMap[c]||[])].sort(sortFn)){
-      const qty=b.all?allFill:b.qty;
-      if(b.all){b.qty=qty;allFill=0;demands[c]+=qty;}
-      for(let i=0;i<qty;i++) remaining[c].push({nick:b.nick,all:b.all,bind:b.bind,fixed:b.fixed,isLift:b.isLift,oid:b.oid});
+    const allFill=Math.max(0,boxesNeeded-(demands[c]||0));
+    const frozenAll={};
+    for(const[key,pin]of Object.entries(p.frozenPins||{})){
+      if(!key.endsWith('|||'+c)||!pin||!pin.oid)continue;
+      if(sorted.some(b=>b.all&&b.oid===pin.oid))frozenAll[pin.oid]=(frozenAll[pin.oid]||0)+1;
+    }
+    const frozenAllTotal=Object.values(frozenAll).reduce((sum,n)=>sum+n,0);
+    const winnerExtra=Math.max(0,allFill-frozenAllTotal);
+    for(const b of sorted){
+      const qty=b.all?((frozenAll[b.oid]||0)+(b===allWinner?winnerExtra:0)):b.qty;
+      if(b.all){b.qty=qty;if(qty)demands[c]+=qty;}
+      for(let i=0;i<qty;i++) remaining[c].push({nick:b.nick,all:b.all,bind:b.bind,fixed:b.fixed,isLift:b.all?false:b.isLift,oid:b.oid});
     }
   }
   const minNoLift=p.contents.length?Math.min(...p.contents.map(c=>(demands[c]||0)-(liftAdd[c]||0))):0;
@@ -2576,15 +2587,10 @@ function showSingleOrderModal(id){
       <input type="file" accept="image/*" multiple onchange="onShotFiles(this)" style="font-size:12px">
       <div id="mOShots" style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px"></div>
     </div>
-    ${isBox?`<div style="margin-bottom:8px">
+    ${isBox?`<div style="margin-bottom:10px">
       <label style="display:inline-flex;align-items:center;gap:4px;font-size:13px;cursor:pointer;white-space:nowrap">
         <input type="checkbox" id="mOLift">帶餘提配</label>
-      <span class="muted" style="font-size:11px;margin-left:6px">帶走餘量，把自己未成團的喊單提前（需在該商品已有喊單記錄）</span>
-    </div>
-    <div style="margin-bottom:10px">
-      <label style="display:inline-flex;align-items:center;gap:4px;font-size:13px;cursor:pointer;white-space:nowrap">
-        <input type="checkbox" id="mOBindLift">帶綁提配</label>
-      <span class="muted" style="font-size:11px;margin-left:6px">可取代含綁成團的綁物缺位，普通成團不會變動</span>
+      <span class="muted" style="font-size:11px;margin-left:6px">提前自己的未成團喊單，也可取代含綁缺位；普通成團不會變動</span>
     </div>`:''}
     <div id="mORows"></div>
     <div style="margin-bottom:10px"><button class="bs" onclick="addOrderRow()">＋ 再加一筆</button></div>
@@ -2722,19 +2728,14 @@ function addMultiOrder(){
     if(seen.has(key)){alert(`同一筆喊單中「${e.item}」重複了`);return;}
     seen.add(key);
     if(g.orders.some(o=>!o.bind&&o.nick===nick&&o.item===e.item&&(o.bpId||null)===(e.bpId||null))){alert(`${nick} 已經有「${e.item}」的喊單，不可重複`);return;}
-    if(e.all){
-      const owner=g.orders.find(o=>o.all&&!o.bind&&o.item===e.item&&(o.bpId||null)===(e.bpId||null));
-      if(owner){alert(`「${e.item}」已由 ${owner.nick} 設為 all`);return;}
-    }
+
   }
-  const isBindLift=!!$('#mOBindLift')?.checked;
-  const isLift=!!$('#mOLift')?.checked||isBindLift;
-  if(isLift&&entries.some(e=>e.all)){alert('all 不可同時使用提配功能');return;}
+  const isLift=!!$('#mOLift')?.checked;
   if(isLift){
     for(const e of entries){
       const p=e.bpId?(g.boxProducts||[]).find(b=>b.id===e.bpId):(g.boxProducts||[]).find(b=>b.contents.includes(e.item));
       if(!p){alert(`「${e.item}」未對應任何商品，無法帶餘提配`);return;}
-      if(!hasUnconfirmedOrders(g,p,nick,isBindLift)){alert(`${nick} 在「${p.name}」沒有可提配的喊單，無法提配`);return;}
+      if(!hasUnconfirmedOrders(g,p,nick)){alert(`${nick} 在「${p.name}」沒有可提配的喊單，無法提配`);return;}
     }
   }
   const contact=$('#mOContact')?.value.trim()||'';
@@ -2751,7 +2752,7 @@ function addMultiOrder(){
     for(const e of entries){
       const product=e.bpId?(g.boxProducts||[]).find(b=>b.id===e.bpId):(g.boxProducts||[]).find(b=>b.contents.includes(e.item));
       if(product&&product.kind!=='single')clearAutoBindOrders(g,product,e.item,e.all?null:e.qty);
-      g.orders.push({id:g.nOid++,nick,item:e.item,series:'',qty:e.qty,price:e.price,note:e.note,bpId:e.bpId,all:e.all,lift:isLift,bindLift:isBindLift,ts:Date.now()});
+      g.orders.push({id:g.nOid++,nick,item:e.item,series:'',qty:e.qty,price:e.price,note:e.note,bpId:e.bpId,all:e.all,lift:isLift,ts:Date.now()});
     }
   });
   closeModal();render();
@@ -2771,9 +2772,8 @@ function showEditOrderModal(gid,oid){
       <div class="form-group"><label>${esc(st.fieldNote)}</label><input id="eONote" value="${esc(o.note||'')}"></div></div>
     ${g.type==='box'?`<div style="margin-bottom:10px">
       <label style="display:inline-flex;align-items:center;gap:4px;font-size:13px;cursor:pointer;white-space:nowrap">
-        <input type="checkbox" id="eOLift" ${o.lift&&!o.bindLift?'checked':''}>帶餘提配</label>
-      <label style="display:inline-flex;align-items:center;gap:4px;font-size:13px;cursor:pointer;white-space:nowrap;margin-left:12px">
-        <input type="checkbox" id="eOBindLift" ${o.bindLift?'checked':''}>帶綁提配</label>
+        <input type="checkbox" id="eOLift" ${o.lift||o.bindLift?'checked':''}>帶餘提配</label>
+      <span class="muted" style="font-size:11px;margin-left:6px">也可取代含綁缺位，普通成團不會變動</span>
     </div>`:''}
     <div class="btn-row"><button class="bp" onclick="saveOrderEdit(${gid},${oid})">儲存</button><button onclick="closeModal()">取消</button></div>`);
 }
@@ -2786,19 +2786,13 @@ function saveOrderEdit(gid,oid){
   if(newItem!==o.item||newNick!==o.nick){
     if(g.orders.some(x=>x.id!==oid&&x.nick===newNick&&x.item===newItem&&(x.bpId||null)===(o.bpId||null))){alert(`${newNick} 已經有「${newItem}」的喊單，不可重複`);return;}
   }
-  if(newAll){
-    const owner=g.orders.find(x=>x.id!==oid&&x.all&&!x.bind&&x.item===newItem&&(x.bpId||null)===(o.bpId||null));
-    if(owner){alert(`「${newItem}」已由 ${owner.nick} 設為 all`);return;}
-  }
-  const isBindLift=!!$('#eOBindLift')?.checked;
-  const isLift=!!$('#eOLift')?.checked||isBindLift;
-  if(newAll&&isLift){alert('all 不可同時使用提配功能');return;}
+  const isLift=!!$('#eOLift')?.checked;
   upG(gid,g=>{const o=g.orders.find(x=>x.id===oid);if(!o)return;
     const product=o.bpId?(g.boxProducts||[]).find(p=>p.id===o.bpId):(g.boxProducts||[]).find(p=>p.contents.includes(o.item));
     if(product&&product.kind!=='single'){freezeConfirmedBoxes(g,product);clearAutoBindOrders(g,product,newItem,newAll?null:(newItem===o.item?Math.max(0,newQty-o.qty):newQty));}
     o.nick=newNick;o.item=newItem;
     o.qty=newAll?1:newQty;o.all=newAll;o.price=parseFloat($('#eOP').value)||0;o.note=$('#eONote').value.trim();
-    o.lift=isLift;o.bindLift=isBindLift;});
+    o.lift=isLift;delete o.bindLift;});
   closeModal();render();
 }
 function delOrder(gid,oid){if(!confirm('刪除？'))return;upG(gid,g=>{g.orders=g.orders.filter(o=>o.id!==oid);});render();}
