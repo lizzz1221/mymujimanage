@@ -53,6 +53,9 @@ td input,td select{padding:4px 6px;font-size:.95em;border-radius:6px}
 .b-red{background:#fde5ea;color:#d16277}
 .b-purple{background:#ece7fa;color:#8a75c9}
 .b-gray{background:#f4eef1;color:#a58a95}
+.ship-status-select{min-width:88px;font-weight:600;transition:background-color .15s,color .15s,border-color .15s}
+.ship-status-sent{background:#e2f5e6;color:#3f8653;border-color:#b9dfc2}
+.ship-status-pending{background:#f4eef1;color:#8d707c;border-color:#ddcfd5}
 .b-teal{background:#dff4ef;color:#3e9e88}
 .b-coral{background:#fdeae2;color:#d07a55}
 
@@ -327,23 +330,111 @@ function releaseLegacyBindLocks(db){
   }
   return changed;
 }
+const LOCAL_BUYERS_KEY='gp_local_group_buyers_v1';
+function loadLocalBuyerStore(){
+  try{
+    const data=JSON.parse(localStorage.getItem(LOCAL_BUYERS_KEY)||'{}');
+    return data&&typeof data==='object'&&!Array.isArray(data)?data:{};
+  }catch(err){console.error(err);return{};}
+}
+function saveLocalBuyerStore(store){localStorage.setItem(LOCAL_BUYERS_KEY,JSON.stringify(store));}
+function normalizeBuyerInfo(info){
+  const b=info&&typeof info==='object'?info:{};
+  let contact=String(b.contact||''),url=String(b.url||'');
+  if(contact&&/^https?:\/\//.test(contact)&&!url){url=contact;contact='';}
+  return {contact,url,shots:Array.isArray(b.shots)?b.shots.filter(Boolean):[]};
+}
+function mergeBuyerInfo(current,incoming){
+  const a=normalizeBuyerInfo(current),b=normalizeBuyerInfo(incoming);
+  return {contact:a.contact||b.contact,url:a.url||b.url,shots:[...new Set([...a.shots,...b.shots])]};
+}
+function migrateLegacyBuyerData(db,rawDb){
+  if(!Object.prototype.hasOwnProperty.call(db,'buyers'))return false;
+  const legacy=db.buyers&&typeof db.buyers==='object'?db.buyers:{};
+  delete db.buyers;
+  if(!Object.keys(legacy).length)return true;
+  const store=loadLocalBuyerStore(),assigned=new Set();
+  let touched=false;
+  for(const g of db.groups||[]){
+    const nicks=new Set([...(g.orders||[]).map(o=>o.nick),...Object.keys(g.pay||{})]);
+    const bucket=store[String(g.id)]||(store[String(g.id)]={});
+    for(const nick of nicks){
+      if(!legacy[nick])continue;
+      assigned.add(nick);
+      const next=mergeBuyerInfo(bucket[nick],legacy[nick]);
+      if(JSON.stringify(bucket[nick]||null)!==JSON.stringify(next)){bucket[nick]=next;touched=true;}
+    }
+  }
+  const unassigned=store._unassigned||(store._unassigned={});
+  for(const[nick,info]of Object.entries(legacy)){
+    if(assigned.has(nick))continue;
+    const next=mergeBuyerInfo(unassigned[nick],info);
+    if(JSON.stringify(unassigned[nick]||null)!==JSON.stringify(next)){unassigned[nick]=next;touched=true;}
+  }
+  if(!touched)return true;
+  try{
+    localStorage.setItem('gp_db2',JSON.stringify(db));
+    saveLocalBuyerStore(store);
+    return true;
+  }catch(err){
+    db.buyers=legacy;
+    try{localStorage.setItem('gp_db2',rawDb);}catch(restoreErr){console.error(restoreErr);}
+    console.error(err);
+    return false;
+  }
+}
+function getBuyers(groupId){
+  if(RO||groupId==null)return{};
+  return loadLocalBuyerStore()[String(groupId)]||{};
+}
+function updateBuyer(groupId,nick,contact,url,addShots){
+  if(RO||groupId==null||!nick)return;
+  const store=loadLocalBuyerStore(),key=String(groupId);
+  const bucket=store[key]||(store[key]={});
+  const b=normalizeBuyerInfo(bucket[nick]);
+  if(contact)b.contact=contact;
+  if(url)b.url=url;
+  if(addShots&&addShots.length)b.shots=[...new Set([...b.shots,...addShots])];
+  bucket[nick]=b;
+  saveLocalBuyerStore(store);
+}
+function delBuyerShot(groupId,nick,idx){
+  if(!confirm('刪除這張截圖？'))return;
+  const store=loadLocalBuyerStore(),bucket=store[String(groupId)];
+  if(bucket&&bucket[nick]&&Array.isArray(bucket[nick].shots)){
+    bucket[nick].shots.splice(idx,1);
+    saveLocalBuyerStore(store);
+  }
+  render();
+}
+function localBuyerNicknameInUse(nick){
+  return Object.values(loadLocalBuyerStore()).some(bucket=>bucket&&Object.prototype.hasOwnProperty.call(bucket,nick));
+}
+function renameLocalBuyerEverywhere(oldNick,newNick){
+  const store=loadLocalBuyerStore();let changed=false;
+  for(const bucket of Object.values(store)){
+    if(!bucket||!Object.prototype.hasOwnProperty.call(bucket,oldNick))continue;
+    bucket[newNick]=mergeBuyerInfo(bucket[newNick],bucket[oldNick]);
+    delete bucket[oldNick];changed=true;
+  }
+  if(changed)saveLocalBuyerStore(store);
+}
 let _vdb=null;
 function loadDB(){
   if(RO){if(!_vdb){_vdb=window.VIEWER_DB;releaseLegacyBindLocks(_vdb);}return _vdb;}
-  const db=JSON.parse(localStorage.getItem('gp_db2')||'{"groups":[],"nid":1}');
+  const rawDb=localStorage.getItem('gp_db2')||'{"groups":[],"nid":1}';
+  const db=JSON.parse(rawDb);
   let changed=releaseLegacyBindLocks(db);
+  if(migrateLegacyBuyerData(db,rawDb))changed=true;
   const statusMap={'開團中':'進行中','已截單':'收款中','已封存':'已結團'};
   for(const g of db.groups){
     if(statusMap[g.status]){g.status=statusMap[g.status];changed=true;}
+    if(g.status==='進行中'&&!g.orderRulesVersion){g.orderRulesVersion=2;changed=true;}
     if(g.deadline&&g.status==='進行中'&&new Date(g.deadline)<new Date()){g.status='已截團待收款';changed=true;}
     // 既有的已到貨團補上到貨時間（囤貨期限起算點，可在團內設定校正）
     if(['已到貨','已結團'].includes(g.status)&&!g.arrivedAt){g.arrivedAt=Date.now();changed=true;}
   }
-  if(!db.buyers)db.buyers={};
-  for(const n of Object.keys(db.buyers)){
-    const b=db.buyers[n];
-    if(b&&b.contact&&/^https?:\/\//.test(b.contact)&&!b.url){b.url=b.contact;b.contact='';changed=true;}
-  }
+
   if(!db.fixedTeam)db.fixedTeam={};
   if(!db.teamNotes)db.teamNotes={};
   if(!db.teamJoinedAt)db.teamJoinedAt={};
@@ -437,8 +528,8 @@ function renderHome(){
     ${RO&&window.VIEWER_DB.publishedAt?`<div class="muted" style="margin-bottom:1rem">資料更新時間：${esc(window.VIEWER_DB.publishedAt)}</div>`:''}
     <div class="toolbar"><button class="bp" onclick="showNewGroupModal()">建立新團</button><button onclick="showFixedTeamModal()">固團成員</button><button onclick="showUnitsModal()">團體管理</button><button onclick="showShipModal()">個人貨況查詢</button><button onclick="showGithubSyncModal()">GitHub 同步</button><button onclick="document.getElementById('importDataFile').click()">匯入 data.js</button><input id="importDataFile" type="file" accept=".js,.txt" style="display:none" onchange="importViewerData(this)"><button onclick="exportViewerData()">發布查詢資料</button><span class="muted">共 ${db.groups.length} 個團</span></div>
     <div class="toolbar" style="margin-top:-4px">
-      <button class="bs" onclick="exportFullBackup()" title="匯出含全部團與私人資料的完整備份，用於裝置間手動同步">📦 匯出完整備份</button>
-      <button class="bs" onclick="document.getElementById('importBackupFile').click()" title="匯入完整備份，會覆蓋此裝置的所有資料">📥 匯入完整備份</button>
+      <button class="bs" onclick="exportFullBackup()" title="匯出團購管理資料；各團本機網址、平台 ID 與喊單截圖不包含在內">📦 匯出完整備份</button>
+      <button class="bs" onclick="document.getElementById('importBackupFile').click()" title="匯入團購管理資料；不影響各團本機網址、平台 ID 與喊單截圖">📥 匯入完整備份</button>
       <input id="importBackupFile" type="file" accept=".json" style="display:none" onchange="importFullBackup(this)">
     </div>
     <div class="filter-chips"><span class="chip ${homeFilter===''?'active':''}" onclick="homeFilter='';render()">全部</span>
@@ -589,7 +680,8 @@ function renderOrdersTab(g){
       if(isBox){const bp=(g.boxProducts||[]).find(p=>orderMatches(p,o)&&p.contents.includes(o.item));boxName=bp?bp.name:'';}
       const pr=effPrice(g,o);
       const isTeam=!!_team[o.nick];
-      const fxBadge=(!isTeam&&o.fixed==='slot'?` <span class="badge b-purple">固${o.fixedRank||''}</span>`:!isTeam&&o.fixed==='pick'?' <span class="badge b-teal">撿</span>':'')+(o.lift?' <span class="badge b-amber">提</span>':'');
+      const liftCount=Math.max(0,parseInt(o.liftCount)||0),liftTargetCount=Array.isArray(o.liftTargets)?o.liftTargets.length:0;
+      const fxBadge=(!isTeam&&o.fixed==='slot'?` <span class="badge b-purple">固${o.fixedRank||''}</span>`:!isTeam&&o.fixed==='pick'?' <span class="badge b-teal">撿</span>':'')+(o.lift?` <span class="badge b-amber">提${liftTargetCount?' · 指定'+liftTargetCount:''}${liftCount?' · 帶'+liftCount:''}</span>`:'');
       h+=`<tr><td>${isTeam?`<span style="color:#a32d2d;font-weight:bold">${esc(o.nick)}</span>`:esc(o.nick)}${fxBadge}</td><td>${esc(o.item)}</td>
         ${isBox?`<td>${boxName?`<span class="badge b-coral">${esc(boxName)}</span>`:`<span class="muted">未對應</span>`}</td>`:''}
         <td>${o.all?'<span class="badge b-green">已 all</span>':o.qty}</td><td>${pr?'$'+pr:'-'}</td><td>${o.all?'<span class="muted">依成團數</span>':pr?'$'+(o.qty*pr):'-'}</td>
@@ -610,10 +702,12 @@ function showShipModal(){
   const db=loadDB();
   const team=getTeam();
   const nicks=Object.keys(team).sort();
+  const visibleGroups=db.groups.filter(g=>['已截團待收款','收款中','已完成收款','已到貨','已結團'].includes(g.status));
   if(_spNick&&!team[_spNick])_spNick='';
+  if(_spGid&&!visibleGroups.some(g=>g.id===parseInt(_spGid)))_spGid='';
   let rowsHtml='';
   if(_spNick){
-    const gs=_spGid?db.groups.filter(g=>g.id===parseInt(_spGid)):db.groups;
+    const gs=_spGid?visibleGroups.filter(g=>g.id===parseInt(_spGid)):visibleGroups;
     for(const g of gs){
       const list=getConfirmedOrders(g).filter(o=>o.nick===_spNick);
       if(!list.length)continue;
@@ -630,9 +724,14 @@ function showShipModal(){
         const arrCell=groupArrived&&!RO
           ?`<span class="badge ${arrived?'b-green':'b-red'}" style="cursor:pointer" title="點擊標記缺件/到貨" onclick="toggleShip(${g.id},'${encodeURIComponent(fullKey)}','na')">${arrived?'已到貨':'缺件'}</span>`
           :`<span class="badge ${arrived?'b-green':(groupArrived&&st.na)?'b-red':'b-amber'}">${arrived?'已到貨':(groupArrived&&st.na)?'缺件':'未到貨'}</span>`;
+        const shipCell=RO
+          ?`<span class="badge ${st.s?'b-green':'b-gray'}">${st.s?'已出貨':'未出貨'}</span>`
+          :`<select class="ship-status-select ${st.s?'ship-status-sent':'ship-status-pending'}" aria-label="${esc(label)}出貨狀態" onchange="setShipStatus(${g.id},'${encodeURIComponent(fullKey)}',this.value)">
+              <option value="0" ${st.s?'':'selected'}>未出貨</option>
+              <option value="1" ${st.s?'selected':''}>已出貨</option>
+            </select>`;
         rows+=`<tr><td>${esc(label)}</td><td style="text-align:center">${o.qty}</td>
-          <td>${arrCell}</td>
-          <td><span class="badge ${st.s?'b-green':'b-gray'}" style="cursor:pointer" title="點擊切換" onclick="toggleShip(${g.id},'${encodeURIComponent(fullKey)}','s')">${st.s?'已出貨':'未出貨'}</span></td></tr>`;
+          <td>${arrCell}</td><td>${shipCell}</td></tr>`;
       }
       // 囤貨期限：轉成已到貨後 2 個月
       let storageLine='';
@@ -654,9 +753,8 @@ function showShipModal(){
   } else rowsHtml=nicks.length?'<div class="empty">請選擇固團成員暱稱</div>':'<div class="empty">尚未設定固團成員</div>';
   // 未選暱稱時團名下拉只有「顯示全部」；選了暱稱後才列出該成員有喊單的團
   const gidOptions=_spNick
-    ?db.groups.filter(g=>getConfirmedOrders(g).some(o=>o.nick===_spNick))
+    ?visibleGroups.filter(g=>getConfirmedOrders(g).some(o=>o.nick===_spNick))
     :[];
-  if(_spGid&&!gidOptions.some(g=>g.id===parseInt(_spGid)))_spGid='';
   openModal(`<h3>個人貨況查詢</h3>
     <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px;align-items:center">
       <select onchange="_spNick=this.value;_spGid='';showShipModal()"><option value="">固團成員</option>${nicks.map(n=>`<option value="${esc(n)}" ${_spNick===n?'selected':''}>${esc(n)}</option>`).join('')}</select>
@@ -674,6 +772,12 @@ function effArrived(g,key){
 function toggleShip(gid,keyEnc,field){
   const key=decodeURIComponent(keyEnc);
   upG(gid,g=>{if(!g.ship)g.ship={};const st=g.ship[key]||{};st[field]=st[field]?0:1;g.ship[key]=st;});
+  showShipModal();
+}
+function setShipStatus(gid,keyEnc,value){
+  if(RO)return;
+  const key=decodeURIComponent(keyEnc),shipped=value==='1';
+  upG(gid,g=>{if(!g.ship)g.ship={};const st=g.ship[key]||{};st.s=shipped?1:0;g.ship[key]=st;});
   showShipModal();
 }
 function toggleShipKey(gid,keyEnc,field){
@@ -696,7 +800,7 @@ function buildViewerDataJs(){
     fixedTeam:db.fixedTeam||{},
     teamJoinedAt:db.teamJoinedAt||{},
     teamNotes:{},
-    buyers:{},
+
     units:db.units||[],
     unitNid:db.unitNid||1,
     roles:db.roles||[],
@@ -713,10 +817,11 @@ function exportViewerData(){
   catch(err){alert(err.message||'沒有可發布的資料');return;}
   const blob=new Blob([file],{type:'text/javascript'});
   const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='data.js';a.click();
-  alert('已下載 data.js。\n把「index.html＋data.js」一起上傳到網站空間（index.html 有 data.js 在旁邊時會自動變成唯讀查詢版）。\n之後資料更新，只要重新發布並覆蓋 data.js。');
+  alert('已下載 data.js。\n把「index.html＋data.js」一起上傳到網站空間（index.html 有 data.js 在旁邊時會自動變成唯讀查詢版）。\n之後資料更新，只要重新發布並覆蓋 data.js；各團本機網址、平台 ID 與喊單截圖不會包含在檔案內。');
 }
 function exportFullBackup(){
-  const db=loadDB();
+  const db=JSON.parse(JSON.stringify(loadDB()));
+  delete db.buyers;
   const pkg={
     kind:'gp_full_backup',
     version:1,
@@ -730,7 +835,7 @@ function exportFullBackup(){
   const ts=new Date();
   const stamp=`${ts.getFullYear()}${String(ts.getMonth()+1).padStart(2,'0')}${String(ts.getDate()).padStart(2,'0')}_${String(ts.getHours()).padStart(2,'0')}${String(ts.getMinutes()).padStart(2,'0')}`;
   a.href=URL.createObjectURL(blob);a.download=`備份_${stamp}.json`;a.click();
-  alert('已下載完整備份（含全部團、聯絡方式、截圖、個人備註）。\n傳到另一台裝置後用「匯入完整備份」讀取即可同步。');
+  alert('已下載完整備份（含全部團與管理資料）。\n各團本機保存的網址、平台 ID、喊單截圖不會匯出，也不會被備份匯入影響。');
 }
 function importFullBackup(input){
   const f=input.files&&input.files[0];
@@ -741,12 +846,14 @@ function importFullBackup(input){
     try{
       const pkg=JSON.parse(String(e.target.result));
       if(pkg.kind!=='gp_full_backup'||!pkg.db)throw new Error('格式不符');
-      if(!confirm(`匯入完整備份會覆蓋此裝置目前的所有資料（含全部團）。\n備份時間：${pkg.exportedAt||'未知'}\n確定繼續？`))return;
-      localStorage.setItem('gp_db2',JSON.stringify(pkg.db));
+      if(!confirm(`匯入完整備份會覆蓋此裝置目前的團購管理資料，但不會更動各團本機網址、平台 ID 與喊單截圖。\n備份時間：${pkg.exportedAt||'未知'}\n確定繼續？`))return;
+      const importedDb=JSON.parse(JSON.stringify(pkg.db));
+      delete importedDb.buyers;
+      localStorage.setItem('gp_db2',JSON.stringify(importedDb));
       if(pkg.settings)localStorage.setItem('gp_settings',JSON.stringify(pkg.settings));
       if(pkg.textOv)localStorage.setItem('gp_text_overrides',JSON.stringify(pkg.textOv));
       _vdb=null;view='home';gid=null;tab='orders';sNick='';sItem='';homeFilter='';
-      alert('備份匯入完成');
+      alert('備份匯入完成；各團本機網址、平台 ID 與喊單截圖保持不變');
       applyTheme();render();
     }catch(err){
       alert('匯入失敗：請確認選的是「匯出完整備份」產生的檔案');
@@ -775,12 +882,13 @@ function importViewerData(input){
       new Function('window',String(e.target.result))(win);
       if(!win.VIEWER_DB||!Array.isArray(win.VIEWER_DB.groups))throw new Error('找不到 VIEWER_DB');
       const db=preserveMissingAdminLibraries(JSON.parse(JSON.stringify(win.VIEWER_DB)));
-      if(!confirm(`匯入後會覆蓋此裝置目前管理資料。\n將匯入 ${db.groups.length} 個團，確定繼續？`))return;
+      delete db.buyers;
+      if(!confirm(`匯入後會覆蓋此裝置目前管理資料，但不會更動各團本機網址、平台 ID 與喊單截圖。\n將匯入 ${db.groups.length} 個團，確定繼續？`))return;
       localStorage.setItem('gp_db2',JSON.stringify(db));
       if(win.VIEWER_SETTINGS)localStorage.setItem('gp_settings',JSON.stringify(win.VIEWER_SETTINGS));
       if(win.VIEWER_TEXTOV)localStorage.setItem('gp_text_overrides',JSON.stringify(win.VIEWER_TEXTOV));
       _vdb=null;view='home';gid=null;tab='orders';sNick='';sItem='';homeFilter='';
-      alert('匯入完成');
+      alert('匯入完成；各團本機網址、平台 ID 與喊單截圖保持不變');
       applyTheme();render();
     }catch(err){
       alert('匯入失敗：請確認選的是本站匯出的 data.js');
@@ -808,7 +916,7 @@ function saveGithubSyncSettings(){
 function showGithubSyncModal(){
   const c=loadGithubSyncSettings();
   const body='<h3>GitHub 同步</h3>'+ 
-    '<p class="muted" style="margin-bottom:10px">Token 只會存在這台裝置的瀏覽器，不會寫進 data.js。</p>'+ 
+    '<p class="muted" style="margin-bottom:10px">Token 與各團保存的網址、平台 ID、喊單截圖只存在這台裝置，不會寫進 data.js，也不會被讀取線上資料覆蓋。</p>'+ 
     '<div class="form-row">'+
       '<div class="form-group"><label>GitHub 帳號</label><input id="ghOwner" value="'+esc(c.owner||'')+'"></div>'+ 
       '<div class="form-group"><label>Repo 名稱</label><input id="ghRepo" value="'+esc(c.repo||'')+'"></div>'+ 
@@ -933,13 +1041,14 @@ async function githubPullData(){
     setGhStatus('正在讀取 GitHub 上的 data.js...');
     const raw=await ghFetch(c,c.path,{query:'?ref='+encodeURIComponent(c.branch)+'&t='+Date.now(),accept:'application/vnd.github.raw'}).then(r=>r.text());
     const win=parseViewerDataText(raw);
-    if(!confirm('讀取到 '+win.VIEWER_DB.groups.length+' 個團。\n匯入後會覆蓋這台裝置目前的管理資料，確定繼續？'))return;
+    if(!confirm('讀取到 '+win.VIEWER_DB.groups.length+' 個團。\n匯入後會覆蓋這台裝置目前的管理資料，但不會更動各團本機網址、平台 ID 與喊單截圖。確定繼續？'))return;
     const importedDb=preserveMissingAdminLibraries(JSON.parse(JSON.stringify(win.VIEWER_DB)));
+    delete importedDb.buyers;
     localStorage.setItem('gp_db2',JSON.stringify(importedDb));
     if(win.VIEWER_SETTINGS)localStorage.setItem('gp_settings',JSON.stringify(win.VIEWER_SETTINGS));
     if(win.VIEWER_TEXTOV)localStorage.setItem('gp_text_overrides',JSON.stringify(win.VIEWER_TEXTOV));
     _vdb=null;view='home';gid=null;tab='orders';sNick='';sItem='';homeFilter='';
-    applyTheme();render();showGithubSyncModal();setGhStatus('已讀取並匯入線上資料');
+    applyTheme();render();showGithubSyncModal();setGhStatus('已讀取並匯入線上資料；各團本機網址、平台 ID 與喊單截圖保持不變');
   }catch(err){
     setGhStatus('讀取失敗：'+err.message);
     console.error(err);
@@ -1326,7 +1435,7 @@ function collectFixedTeamForm(){
 }
 function nicknameInUse(db,nick){
   if(Object.prototype.hasOwnProperty.call(db.fixedTeam||{},nick))return true;
-  if(Object.prototype.hasOwnProperty.call(db.buyers||{},nick))return true;
+  if(localBuyerNicknameInUse(nick))return true;
   return (db.groups||[]).some(g=>(g.orders||[]).some(o=>o.nick===nick)||Object.prototype.hasOwnProperty.call(g.pay||{},nick));
 }
 function renamePinNick(map,oldNick,newNick){
@@ -1347,10 +1456,7 @@ function renameMemberEverywhere(db,oldNick,newNick){
     db.teamJoinedAt[newNick]=db.teamJoinedAt[oldNick];
     delete db.teamJoinedAt[oldNick];
   }
-  if(Object.prototype.hasOwnProperty.call(db.buyers||{},oldNick)){
-    db.buyers[newNick]=db.buyers[oldNick];
-    delete db.buyers[oldNick];
-  }
+
   for(const g of db.groups||[]){
     for(const order of g.orders||[])if(order.nick===oldNick)order.nick=newNick;
     if(Object.prototype.hasOwnProperty.call(g.pay||{},oldNick)){
@@ -1376,6 +1482,7 @@ function renameMemberEverywhere(db,oldNick,newNick){
       }
     }
   }
+  renameLocalBuyerEverywhere(oldNick,newNick);
 }
 function renameFixedMember(oldNickEnc){
   const oldNick=decodeURIComponent(oldNickEnc);
@@ -1508,6 +1615,7 @@ function renderBoxSetupTab(g){
     for(const p of boxes){
       const open=!!_bpOpen[p.id];
       const info=calcBoxes(g,p);
+      const fullAllNoLimit=!p.maxBoxes&&info.onlyAll&&!(p.kind==='blind'&&p.blindOpened)&&p.contents.length>0&&p.contents.every(c=>(info.buyerMap[c]||[]).some(row=>row.all));
       let statLine;
       if(p.kind==='blind'&&p.blindOpened){
         const actualQty=getBlindProductConfirmedOrders(g,p).reduce((sum,o)=>sum+o.qty,0);
@@ -1522,7 +1630,7 @@ function renderBoxSetupTab(g){
       }
       h+=`<div class="box-product">
         <div class="box-product-header" style="cursor:pointer" onclick="toggleBpDetail(${p.id})">
-          <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap"><span class="twisty ${open?'open':''}" aria-hidden="true"></span>${p.img?`<img src="${p.img}" style="width:28px;height:28px;object-fit:cover;border-radius:4px;cursor:zoom-in" onclick="event.stopPropagation();showImg(this.src)">`:''}<strong>${esc(p.name)}</strong>
+          <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap"><span class="twisty ${open?'open':''}" aria-hidden="true"></span>${p.img?`<img src="${p.img}" style="width:28px;height:28px;object-fit:cover;border-radius:4px;cursor:zoom-in" onclick="event.stopPropagation();showImg(this.src)">`:''}<strong style="${fullAllNoLimit?'color:#a32d2d':''}">${esc(p.name)}${fullAllNoLimit?' !':''}</strong>
             <span style="margin-left:6px;font-size:12px;display:inline-flex;gap:10px;flex-wrap:wrap">${statLine}</span></div>
           <div style="display:flex;gap:4px" onclick="event.stopPropagation()">
             <button class="bs bg" onclick="showEditBoxProductModal(${g.id},${p.id})">編輯</button>
@@ -1637,7 +1745,7 @@ function bpDetailHtml(g,p){
     else if(surplus>0) st=`<span class="badge b-amber">餘 ${surplus}</span>`;
     else st='<span class="badge b-green">已無</span>';
     h+=`<tr><td>${esc(c)}</td><td>${itemPrice!=null?'$'+itemPrice:'-'}</td><td>${demand}</td><td>${supply}</td><td>${st}</td>
-      <td class="muted">${buyers.filter(b=>!b.all||b.qty>0).map(b=>`${esc(b.nick)}${b.bind?'(綁)':''}${b.all?'（已 all）':'×'+b.qty}`).join(', ')||'-'}</td></tr>`;
+      <td class="muted">${buyers.filter(b=>!b.all||b.qty>0).map(b=>`${esc(b.nick)}${b.bind?'(綁)':''}${b.liftExtra?'(帶餘)':''}${b.all?'（已 all）':'×'+b.qty}`).join(', ')||'-'}</td></tr>`;
   }
   h+=`</tbody></table></div>`;
 
@@ -1646,7 +1754,8 @@ function bpDetailHtml(g,p){
   if(tableRows>0){
     const bind=p.bindItems||{};
     let showN=tableRows;
-    if(!p.maxBoxes&&!blindResult){
+    if(info.onlyAll&&!blindResult)showN=Math.min(showN,5);
+    else if(!p.maxBoxes&&!blindResult){
       const filled=info.boxes.filter(b=>b.every(s=>s.buyer)).length;
       showN=Math.min(info.boxesNeeded,filled+10);
     }
@@ -1667,7 +1776,7 @@ function bpDetailHtml(g,p){
             else cellStyles.push('background:#fde7ec');
           }
           if(needBind)cellStyles.push('color:#a32d2d','font-weight:bold');
-          h+=`<td${cellStyles.length?` style="${cellStyles.join(';')}"`:''}>${esc(slot.buyer.nick)}${slot.buyer.all?'（all）':''}${slot.buyer.bind?'(綁)':''}${slot.buyer.manual?'*':''}<span class="slot-del" title="移除此格喊單" onclick="event.stopPropagation();removeSlotUnit(${g.id},${p.id},${i},'${encodeURIComponent(slot.item)}','${encodeURIComponent(slot.buyer.nick)}',${slot.buyer.bind?1:0})">✕</span></td>`;
+          h+=`<td${cellStyles.length?` style="${cellStyles.join(';')}"`:''}>${esc(slot.buyer.nick)}${slot.buyer.all?'（all）':''}${slot.buyer.bind?'(綁)':''}${slot.buyer.liftExtra?'(帶餘)':''}${slot.buyer.manual?'*':''}${slot.buyer.liftExtra?'':`<span class="slot-del" title="移除此格喊單" onclick="event.stopPropagation();removeSlotUnit(${g.id},${p.id},${i},'${encodeURIComponent(slot.item)}','${encodeURIComponent(slot.buyer.nick)}',${slot.buyer.bind?1:0})">✕</span>`}</td>`;
         }
         else{
           const opened=Math.max(0,parseInt((p.blindCounts||{})[slot.item])||0);
@@ -1719,15 +1828,43 @@ function resetBoxRowPrices(gid,pid,boxIdx){
   closeModal();render();
 }
 
-function hasUnconfirmedOrders(g,p,nick){
-  const source={...g,orders:g.orders.filter(o=>!(o.bind&&o.autoBind&&orderMatches(p,o)))};
-  const info=calcBoxes(source,p);
+function getLiftCandidateOrders(g,p,nick,excludeId=0){
+  const source={...g,orders:g.orders.filter(o=>o.id!==excludeId&&!(o.bind&&o.autoBind&&orderMatches(p,o)))};
+  const orders=source.orders.filter(o=>!o.bind&&o.nick===nick&&p.contents.includes(o.item)&&orderMatches(p,o));
+  if(!orders.length)return [];
+  const info=calcBoxes(source,p),allocated={};
   for(const box of info.boxes){
-    if(box.every(s=>s.buyer))continue;
-    if(box.some(s=>s.buyer&&!s.buyer.bind&&s.buyer.nick===nick))return true;
+    const confirmed=box.status==='成團';
+    for(const slot of box){
+      if(!slot.buyer||slot.buyer.bind||slot.buyer.nick!==nick)continue;
+      const key=(slot.buyer.oid||0)+'|||'+slot.item;
+      const count=allocated[key]||(allocated[key]={total:0,pending:0});
+      count.total++;
+      if(!confirmed)count.pending++;
+    }
   }
-  return false;
+  return orders.filter(o=>{
+    if(o.all)return true;
+    const count=allocated[(o.id||0)+'|||'+o.item]||{total:0,pending:0};
+    return count.pending>0||count.total<Math.max(0,parseInt(o.qty)||0);
+  });
 }
+function hasUnconfirmedOrders(g,p,nick){return getLiftCandidateOrders(g,p,nick).length>0;}
+function liftTargetListHtml(g,p,nick,selected=[],excludeId=0,inputClass='liftTargetCheck'){
+  if(!nick)return '<div class="muted" style="font-size:12px">請先輸入暱稱</div>';
+  const selectedIds=new Set((selected||[]).map(Number));
+  const candidates=getLiftCandidateOrders(g,p,nick,excludeId);
+  const candidateIds=new Set(candidates.map(o=>o.id));
+  const orders=g.orders.filter(o=>!o.bind&&o.id!==excludeId&&o.nick===nick&&p.contents.includes(o.item)&&orderMatches(p,o))
+    .sort((a,b)=>boxOrderTime(a)-boxOrderTime(b)||(a.id||0)-(b.id||0));
+  if(!orders.length)return '<div class="muted" style="font-size:12px">這個商品沒有此人的既有喊單</div>';
+  return `<div style="display:flex;gap:6px;flex-wrap:wrap">${orders.map(o=>{
+    const available=candidateIds.has(o.id),preserved=selectedIds.has(o.id);
+    const disabled=!available&&!preserved;
+    return `<label style="display:inline-flex;align-items:center;gap:4px;padding:5px 8px;border:1px solid ${available||preserved?'#d9b2c1':'#e6e0e2'};border-radius:5px;font-size:12px;cursor:${disabled?'not-allowed':'pointer'};opacity:${disabled?'.62':'1'}"><input type="checkbox" class="${inputClass}" data-lift-available="${available||preserved?'1':'0'}" value="${o.id}" ${preserved?'checked':''} ${disabled?'disabled':''}>${esc(o.item)} <span class="muted">${o.all?'all':'×'+o.qty} · ${esc(fmtTs(o.ts))}${available?'':' · 已成團，不可新指定'}</span></label>`;
+  }).join('')}</div>`;
+}
+function checkedLiftTargetIds(selector){return [...document.querySelectorAll(selector+':checked')].map(el=>parseInt(el.value)).filter(Number.isFinite);}
 function clearAutoBindOrders(g,p,item,qty,boxIdx){
   if(!p)return;
   let remaining=qty==null?Number.MAX_SAFE_INTEGER:Math.max(0,parseInt(qty)||0);
@@ -1774,19 +1911,47 @@ function snapshotTableLayoutExcept(g,p,skipKey){
   });
   p.layoutPins=layout;
 }
+function refreshFillLiftTargets(gid,pid,item){
+  const box=$('#fsLiftTargets');if(!box)return;
+  const g=getG(gid),p=(g?.boxProducts||[]).find(x=>x.id===pid),nick=$('#fsNick')?.value.trim()||'';
+  if(!g||!p)return;
+  const existing=g.orders.find(o=>!o.bind&&o.nick===nick&&o.item===item&&orderMatches(p,o)&&o.lift);
+  const selected=box.dataset.nick===nick?checkedLiftTargetIds('.fsLiftTarget'):(existing?.liftTargets||[]);
+  box.innerHTML=liftTargetListHtml(g,p,nick,selected,existing?.id||0,'fsLiftTarget');
+  box.dataset.nick=nick;
+  const enabled=!!$('#fsLift')?.checked&&!usesLegacyClosedRules(g);
+  box.querySelectorAll('input').forEach(el=>el.disabled=!enabled||el.dataset.liftAvailable!=='1');
+}
+function toggleFillLiftOptions(cb,gid,pid,item){
+  const count=$('#fsLiftCount');if(count){count.disabled=!cb.checked;if(!cb.checked)count.value=0;}
+  refreshFillLiftTargets(gid,pid,item);
+}
+function refreshFillMemberPriority(gid){
+  const wrap=$('#fsMemberPriorityWrap'),cb=$('#fsMemberPriority');if(!wrap||!cb)return;
+  const g=getG(gid),nick=$('#fsNick')?.value.trim()||'';
+  const available=g?.type==='box'&&!!getTeam()[nick]&&!usesLegacyClosedRules(g);
+  wrap.style.display=available?'inline-flex':'none';cb.disabled=!available;if(!available)cb.checked=false;
+}
 function fillSlot(gid,pid,boxIdx,itemEnc){
   const item=decodeURIComponent(itemEnc);
   const g=getG(gid);
+  const liftLocked=usesLegacyClosedRules(g);
   const nicks=[...new Set(g.orders.map(o=>o.nick))];
   openModal(`<h3>第 ${boxIdx+1} 配「${esc(item)}」追加喊單</h3>
     <div class="form-group" style="margin:10px 0"><label>暱稱</label>
       <input id="fsNick" list="fsDl"><datalist id="fsDl">${nicks.map(n=>`<option value="${esc(n)}">`).join('')}</datalist></div>
+    <label id="fsMemberPriorityWrap" style="display:none;align-items:center;gap:5px;font-size:13px;margin:0 0 10px;cursor:pointer"><input type="checkbox" id="fsMemberPriority">優先於群外</label>
     <div style="margin-bottom:12px">
       <label style="display:inline-flex;align-items:center;gap:4px;font-size:13px;cursor:pointer;white-space:nowrap">
-        <input type="checkbox" id="fsLift">帶餘提配</label>
-      <span class="muted" style="font-size:11px;margin-left:6px">提前此人的未成團喊單，也可取代含綁缺位；普通成團不會變動</span>
+        <input type="checkbox" id="fsLift" ${liftLocked?'disabled':''} onchange="toggleFillLiftOptions(this,${gid},${pid},decodeURIComponent('${encodeURIComponent(item)}'))">帶餘提配</label>
+      <label style="display:inline-flex;align-items:center;gap:5px;font-size:12px;margin-left:10px">任意帶餘
+        <input id="fsLiftCount" type="number" min="0" step="1" value="0" disabled style="width:68px;padding:5px 7px">顆</label>
+      <div class="muted" style="font-size:11px;margin-top:4px">數字代表每配最多承接幾顆不限款式的剩餘空位；0 為只提配指定款式。已成團原則不變，但團員可取代團外者</div>
+      ${liftLocked?'<div class="muted" style="font-size:11px;margin-top:5px;color:#a32d2d">此團已截團並鎖定舊排序，不可新增或修改帶餘提配。</div>':''}<div style="font-size:12px;font-weight:600;margin-top:8px">指定要提配的既有喊單（必選，可複選）</div><div id="fsLiftTargets" style="margin-top:5px;padding:8px;border:1px solid #ead7df;border-radius:6px"><div class="muted" style="font-size:12px">請先輸入暱稱</div></div>
     </div>
     <div class="btn-row"><button class="bp" onclick="doFillSlot(${gid},${pid},${boxIdx},'${encodeURIComponent(item)}')">新增</button><button onclick="closeModal()">取消</button></div>`);
+  $('#fsNick').addEventListener('input',()=>{refreshFillLiftTargets(gid,pid,item);refreshFillMemberPriority(gid);});
+  refreshFillLiftTargets(gid,pid,item);refreshFillMemberPriority(gid);
   setTimeout(()=>$('#fsNick').focus(),100);
 }
 function doFillSlot(gid,pid,boxIdx,itemEnc){
@@ -1794,19 +1959,26 @@ function doFillSlot(gid,pid,boxIdx,itemEnc){
   const n=$('#fsNick').value.trim();
   if(!n){alert('請輸入暱稱');return;}
   const isLift=$('#fsLift').checked;
+  const liftCount=isLift?Math.max(0,parseInt($('#fsLiftCount')?.value)||0):0;
+  const liftTargets=isLift?checkedLiftTargetIds('.fsLiftTarget'):[];
   const g=getG(gid);
+  const memberPriority=!!getTeam()[n]&&!!$('#fsMemberPriority')?.checked&&!usesLegacyClosedRules(g);
   const p=(g.boxProducts||[]).find(b=>b.id===pid);if(!p)return;
   if(isLift){
-    if(!hasUnconfirmedOrders(g,p,n)){alert(`${n} 在「${p.name}」沒有可提配的喊單，無法提配`);return;}
+    const existing=g.orders.find(o=>!o.bind&&o.nick===n&&o.item===item&&orderMatches(p,o)&&o.lift);
+    const candidateIds=new Set(getLiftCandidateOrders(g,p,n,existing?.id||0).map(o=>o.id));
+    if(!candidateIds.size){alert(`${n} 在「${p.name}」沒有可提配的喊單，無法提配`);return;}
+    if(!liftTargets.some(id=>candidateIds.has(id))){alert('請至少指定一筆目前可提配的喊單');return;}
   }
   upG(gid,g2=>{
+    if(isLift)g2.orderRulesVersion=2;
     const p2=(g2.boxProducts||[]).find(b=>b.id===pid);if(!p2)return;
     freezeConfirmedBoxes(g2,p2);
     clearAutoBindOrders(g2,p2,item,1);
     if(p2.frozenPins)delete p2.frozenPins[boxIdx+'|||'+item];
-    const ex=g2.orders.find(o=>!o.bind&&o.nick===n&&o.item===item&&orderMatches(p2,o)&&(!!o.lift)===isLift);
-    if(ex)ex.qty+=1;
-    else g2.orders.push({id:g2.nOid++,nick:n,item,series:'',qty:1,price:lookupPrice(g2,item,pid)||0,note:'',bpId:pid,lift:isLift,ts:Date.now()});
+    const ex=g2.orders.find(o=>!o.bind&&o.nick===n&&o.item===item&&orderMatches(p2,o)&&(!!o.lift)===isLift&&(!!o.memberPriority)===memberPriority);
+    if(ex){ex.qty+=1;ex.liftCount=liftCount;ex.liftTargets=isLift?[...new Set([...(ex.liftTargets||[]),...liftTargets])]:[];}
+    else g2.orders.push({id:g2.nOid++,nick:n,item,series:'',qty:1,price:lookupPrice(g2,item,pid)||0,note:'',bpId:pid,lift:isLift,liftCount,liftTargets:isLift?[...liftTargets]:[],memberPriority,ts:Date.now()});
     if(!p2.pins)p2.pins={};
     p2.pins[boxIdx+'|||'+item]=n;
   });
@@ -1847,7 +2019,7 @@ function applyBind(gid,pid,boxIdx){
   closeModal();render();
 }
 function freezeConfirmedBoxes(g,p){
-  if(!p||p.kind==='single')return;
+  if(usesLegacyClosedRules(g)||!p||p.kind==='single')return;
   const info=calcBoxes(g,p);
   const frozen=p.frozenPins||{};
   info.boxes.forEach((box,boxIdx)=>{
@@ -1863,6 +2035,7 @@ function freezeConfirmedBoxes(g,p){
 }
 
 function stabilizeConfirmedBoxes(g){
+  if(usesLegacyClosedRules(g))return;
   for(const p of(g.boxProducts||[])){
     if(p.kind==='single')continue;
     const frozen=p.frozenPins||{};
@@ -1905,7 +2078,7 @@ function boxOrderPriority(g,item,e,team){
   if(e.bind)cls=5;
   else if(type==='slot')cls=fixedActive?0:1;
   else if(type==='pick')cls=1;
-  else if(type==='member')cls=2;
+  else if(type==='member')cls=usesLegacyClosedRules(g)||e.memberPriority?2:3;
   return {cls,rank};
 }
 function boxOrderTime(o){
@@ -1916,6 +2089,7 @@ function compareBoxOrders(a,b,rule,distinct){
   if(a._cls!==b._cls)return a._cls-b._cls;
   if(a._cls===0&&a._rank!==b._rank)return a._rank-b._rank;
   if(a._cls===3){
+    if(a._isTeam||b._isTeam)return boxOrderTime(a)-boxOrderTime(b)||(a.oid||Number.MAX_SAFE_INTEGER)-(b.oid||Number.MAX_SAFE_INTEGER)||a.seq-b.seq;
     if(rule==='single'&&b.qty!==a.qty)return b.qty-a.qty;
     if(rule==='easy'){
       const da=distinct[a.nick]?.size||0,db=distinct[b.nick]?.size||0;
@@ -1939,7 +2113,8 @@ function getBoxBindPlan(p,box){
   }
   return plan;
 }
-function calcBoxes(g,p){
+function usesLegacyClosedRules(g){return !!(g&&g.status&&g.status!=='進行中'&&!g.orderRulesVersion);}
+function calcBoxesLegacy(g,p){
   const demands={};
   const buyerMap={};
   for(const c of p.contents){demands[c]=0;buyerMap[c]=[];}
@@ -1977,6 +2152,7 @@ function calcBoxes(g,p){
       const priority=boxOrderPriority(g,c,e,team);
       e._cls=priority.cls;
       e._rank=priority.rank;
+      e._isTeam=!!team[e.nick];
     }
     const sortFn=(a,b)=>compareBoxOrders(a,b,rule,distinct);
     const sorted=[...(buyerMap[c]||[])].sort(sortFn);
@@ -2098,6 +2274,258 @@ function calcBoxes(g,p){
   return {demands,buyerMap,maxDemand,minDemand,boxesNeeded,complete,bindComplete,surplus,boxes};
 }
 
+function calcBoxes(g,p){
+  if(usesLegacyClosedRules(g))return calcBoxesLegacy(g,p);
+  const demands={};
+  const buyerMap={};
+  for(const c of p.contents){demands[c]=0;buyerMap[c]=[];}
+  const liftQty={};const liftAdd={};const liftTake={};const liftTakeOid={};
+  const liftTargetIds={};const liftTargetMode={};
+  const orderById=new Map(g.orders.map(o=>[o.id,o]));
+  for(const o of g.orders){
+    if(o.lift&&!o.bind&&p.contents.includes(o.item)&&orderMatches(p,o)){
+      liftQty[o.nick]=(liftQty[o.nick]||0)+o.qty;
+      liftAdd[o.item]=(liftAdd[o.item]||0)+o.qty;
+      if(Array.isArray(o.liftTargets)){
+        liftTargetMode[o.nick]=true;
+        const ids=liftTargetIds[o.nick]||(liftTargetIds[o.nick]=new Set());
+        for(const rawId of o.liftTargets){
+          const id=parseInt(rawId),target=orderById.get(id);
+          if(target&&!target.bind&&target.nick===o.nick&&p.contents.includes(target.item)&&orderMatches(p,target))ids.add(id);
+        }
+      }
+      const take=Math.max(0,parseInt(o.liftCount)||0);
+      if(take>(liftTake[o.nick]||0)){
+        liftTake[o.nick]=take;
+        liftTakeOid[o.nick]=o.id||0;
+      }
+    }
+  }
+  let seq=0,matchedOrderCount=0;const distinct={};
+  for(const o of g.orders){
+    if(p.contents.includes(o.item)&&orderMatches(p,o)){
+      matchedOrderCount++;
+      buyerMap[o.item]=buyerMap[o.item]||[];
+      buyerMap[o.item].push({nick:o.nick,qty:o.all?0:o.qty,all:!!o.all,bind:!!o.bind,fixed:o.fixed||null,fixedRank:o.fixedRank||0,fixedItems:o.fixedItems||null,isLift:!!o.lift,isLiftTarget:!!liftTargetIds[o.nick]?.has(o.id),memberPriority:!!o.memberPriority,liftCount:Math.max(0,parseInt(o.liftCount)||0),oid:o.id||0,ts:o.ts||0,seq});
+      if(!o.bind)(distinct[o.nick]=distinct[o.nick]||new Set()).add(o.item);
+    }
+    seq++;
+  }
+  const rule=p.sortRule||'fifo';
+  const team=getTeam();
+  const sortedMap={};const allWinnerMap={};
+  let effectiveNonAllOrderCount=0;
+  const compareAllBoundary=(a,b)=>{
+    if(a._cls!==b._cls)return a._cls-b._cls;
+    if(a._cls===0&&a._rank!==b._rank)return a._rank-b._rank;
+    return boxOrderTime(a)-boxOrderTime(b)||(a.oid||Number.MAX_SAFE_INTEGER)-(b.oid||Number.MAX_SAFE_INTEGER)||a.seq-b.seq;
+  };
+  for(const c of p.contents){
+    for(const e of (buyerMap[c]||[])){
+      const priority=boxOrderPriority(g,c,e,team);
+      e._cls=priority.cls;
+      e._rank=priority.rank;
+      e._isTeam=!!team[e.nick];
+    }
+    const sortFn=(a,b)=>compareBoxOrders(a,b,rule,distinct);
+    const sorted=[...(buyerMap[c]||[])].sort(sortFn);
+    const allWinner=sorted.filter(b=>b.all).sort(compareAllBoundary)[0]||null;
+    const frozenRegular={};
+    for(const[key,pin]of Object.entries(p.frozenPins||{})){
+      if(!key.endsWith('|||'+c)||!pin||!pin.oid)continue;
+      const found=sorted.find(b=>!b.all&&b.oid===pin.oid);
+      const priorityAllReplaces=found&&allWinner&&allWinner._cls<found._cls;
+      if(found&&!priorityAllReplaces)frozenRegular[pin.oid]=(frozenRegular[pin.oid]||0)+1;
+    }
+    demands[c]=0;
+    for(const b of sorted){
+      if(b.all)continue;
+      const winnerLift=allWinner&&(allWinner.isLift||allWinner.isLiftTarget);
+      const buyerLift=b.isLift||b.isLiftTarget;
+      const allIsEarlier=allWinner&&(
+        (winnerLift&&!buyerLift)||
+        (winnerLift===buyerLift&&compareAllBoundary(allWinner,b)<=0)
+      );
+      b._activeQty=allIsEarlier?Math.min(b.qty,frozenRegular[b.oid]||0):b.qty;
+      demands[c]+=b._activeQty;
+      if(b._activeQty)effectiveNonAllOrderCount++;
+    }
+    sortedMap[c]=sorted;
+    allWinnerMap[c]=allWinner;
+  }
+  const maxDemand=Math.max(0,...Object.values(demands));
+  const minDemand=p.contents.length?Math.min(...p.contents.map(c=>demands[c]||0)):0;
+  const onlyAll=matchedOrderCount>0&&effectiveNonAllOrderCount===0;
+  const blindAllCount=p.kind==='blind'&&p.blindOpened?Math.max(0,...p.contents.map(c=>Math.max(0,parseInt((p.blindCounts||{})[c])||0))):0;
+  const allOnlyFallback=p.kind==='blind'&&p.blindOpened?blindAllCount:5;
+  let boxesNeeded=onlyAll?(Math.max(0,parseInt(p.maxBoxes)||0)||allOnlyFallback):maxDemand;
+  if(p.maxBoxes && boxesNeeded>p.maxBoxes) boxesNeeded=p.maxBoxes;
+  const bind=p.bindItems||{};
+  let surplus=0;
+  for(const c of p.contents) surplus+=Math.max(0,boxesNeeded-(demands[c]||0));
+
+  const boxes=[];
+  const remaining={};
+  for(const c of p.contents){
+    const sorted=sortedMap[c]||[];
+    const allWinner=allWinnerMap[c]||null;
+    remaining[c]=[];
+    const allFill=Math.max(0,boxesNeeded-(demands[c]||0));
+    const frozenAll={};
+    for(const[key,pin]of Object.entries(p.frozenPins||{})){
+      if(!key.endsWith('|||'+c)||!pin||!pin.oid)continue;
+      if(sorted.some(b=>b.all&&b.oid===pin.oid))frozenAll[pin.oid]=(frozenAll[pin.oid]||0)+1;
+    }
+    const frozenAllTotal=Object.values(frozenAll).reduce((sum,n)=>sum+n,0);
+    let extraRemaining=Math.max(0,allFill-frozenAllTotal);
+    const allExtra={};
+    const liftedAll=sorted.filter(b=>b.all&&(b.isLift||b.isLiftTarget));
+    const liftUsed={};
+    for(const b of liftedAll)liftUsed[b.nick]=(liftUsed[b.nick]||0)+(frozenAll[b.oid]||0);
+    for(const b of liftedAll){
+      if(b===allWinner)continue;
+      const allowance=Math.max(0,(liftQty[b.nick]||0)-(liftUsed[b.nick]||0));
+      const take=Math.min(extraRemaining,allowance);
+      if(take){allExtra[b.oid]=(allExtra[b.oid]||0)+take;liftUsed[b.nick]=(liftUsed[b.nick]||0)+take;extraRemaining-=take;}
+      if(!extraRemaining)break;
+    }
+    if(allWinner&&extraRemaining)allExtra[allWinner.oid]=(allExtra[allWinner.oid]||0)+extraRemaining;
+    for(const b of sorted){
+      const qty=b.all?((frozenAll[b.oid]||0)+(allExtra[b.oid]||0)):b._activeQty;
+      if(b.all){b.qty=qty;if(qty)demands[c]+=qty;}
+      for(let i=0;i<qty;i++) remaining[c].push({nick:b.nick,all:b.all,bind:b.bind,fixed:b.fixed,isLift:b.all?((b.isLift||b.isLiftTarget)&&i<(liftQty[b.nick]||0)):b.isLift,memberPriority:!!b.memberPriority,priorityCls:b._cls,oid:b.oid});
+    }
+  }
+  const minNoLift=p.contents.length?Math.min(...p.contents.map(c=>(demands[c]||0)-(liftAdd[c]||0))):0;
+  const lockN=Math.min(Math.max(0,minNoLift),boxesNeeded);
+  const liftersOrder=[];const _seenL={};
+  for(const o of [...g.orders].sort((a,b)=>boxOrderTime(a)-boxOrderTime(b)||(a.id||0)-(b.id||0))){
+    if(o.lift&&!o.bind&&p.contents.includes(o.item)&&orderMatches(p,o)&&!_seenL[o.nick]){_seenL[o.nick]=1;liftersOrder.push(o.nick);}
+  }
+  if(liftersOrder.length){
+    const styleData={};
+    for(const c of p.contents){
+      const q=remaining[c];
+      const liftUnits=q.filter(u=>u.isLift);
+      const nonLift=q.filter(u=>!u.isLift);
+      const locked=nonLift.slice(0,lockN);
+      const rest=nonLift.slice(lockN);
+      const byNick={};const promoUsed={};const normal=[];
+      for(const u of liftUnits){(byNick[u.nick]=byNick[u.nick]||[]).push(u);}
+      for(const u of rest){
+        const targetAllowed=!liftTargetMode[u.nick]||!!liftTargetIds[u.nick]?.has(u.oid);
+        if(!u.bind&&targetAllowed&&liftQty[u.nick]>0&&(promoUsed[u.nick]||0)<liftQty[u.nick]){
+          promoUsed[u.nick]=(promoUsed[u.nick]||0)+1;u.lifted=true;
+          (byNick[u.nick]=byNick[u.nick]||[]).push(u);continue;
+        }
+        normal.push(u);
+      }
+      styleData[c]={locked,byNick,normal};
+    }
+    const blocks={};const blockSizes={};let offsetTotal=0;
+    for(const nick of liftersOrder){
+      const size=Math.max(0,...p.contents.map(c=>(styleData[c].byNick[nick]||[]).length));
+      blocks[nick]=offsetTotal;blockSizes[nick]=size;offsetTotal+=size;
+    }
+    for(const c of p.contents){
+      const{locked,byNick,normal}=styleData[c];
+      const arr=new Array(offsetTotal).fill(null);
+      for(const nick of liftersOrder){
+        (byNick[nick]||[]).forEach((u,i)=>{arr[blocks[nick]+i]=u;});
+      }
+      const out=[];let ni=0;
+      for(let i=0;i<arr.length;i++)out.push(arr[i]!==null?arr[i]:(ni<normal.length?normal[ni++]:null));
+      while(ni<normal.length)out.push(normal[ni++]);
+      remaining[c]=locked.concat(out);
+    }
+    for(const nick of liftersOrder){
+      const take=Math.max(0,liftTake[nick]||0);
+      if(!take)continue;
+      const oid=liftTakeOid[nick]||0;
+      for(let rowOffset=0;rowOffset<(blockSizes[nick]||0);rowOffset++){
+        let left=take;
+        const row=lockN+blocks[nick]+rowOffset;
+        for(const c of p.contents){
+          if(!left)break;
+          if(remaining[c][row])continue;
+          remaining[c][row]={nick,all:false,bind:false,fixed:null,isLift:true,lifted:true,liftExtra:true,oid};
+          demands[c]=(demands[c]||0)+1;
+          const summary=(buyerMap[c]||[]).find(b=>b.liftExtra&&b.nick===nick&&b.oid===oid);
+          if(summary)summary.qty++;
+          else (buyerMap[c]=buyerMap[c]||[]).push({nick,qty:1,all:false,bind:false,fixed:null,isLift:true,liftExtra:true,oid,ts:0,seq:Number.MAX_SAFE_INTEGER});
+          left--;
+        }
+      }
+    }
+    const arrangedNeeded=Math.max(0,...p.contents.map(c=>remaining[c].length));
+    boxesNeeded=p.maxBoxes?Math.min(arrangedNeeded,p.maxBoxes):arrangedNeeded;
+    surplus=0;
+    for(const c of p.contents)surplus+=Math.max(0,boxesNeeded-(demands[c]||0));
+  }
+  const frozenPins=p.frozenPins||{};
+  const layoutPins=g.keepTableOrderOnDelete?(p.layoutPins||{}):{};
+  const pins=p.pins||{};
+  const reserved={};
+  const pinLast=Math.max(-1,...[...Object.keys(frozenPins),...Object.keys(layoutPins),...Object.keys(pins)].map(key=>parseInt(key.split('|||')[0])).filter(Number.isFinite));
+  if(pinLast>=boxesNeeded)boxesNeeded=pinLast+1;
+  const reservePin=(key,spec,isFrozen)=>{
+    const sep=key.indexOf('|||');
+    const bi=parseInt(key.slice(0,sep)),item=key.slice(sep+3);
+    if(isNaN(bi)||bi>=boxesNeeded||!remaining[item]||Object.prototype.hasOwnProperty.call(reserved,key))return;
+    const pin=typeof spec==='string'?{nick:spec}:spec;
+    if(pin&&pin.empty){reserved[key]=null;return;}
+    if(isFrozen&&pin&&!pin.empty&&!pin.bind&&!team[pin.nick]){
+      const pinnedOrder=pin.oid?orderById.get(pin.oid):null;
+      const pinnedPriority=pinnedOrder?boxOrderPriority(g,item,{...pinnedOrder,oid:pinnedOrder.id},team).cls:3;
+      const memberIdx=remaining[item].findIndex(u=>u&&!u.bind&&team[u.nick]&&(u.priorityCls??3)<pinnedPriority);
+      if(memberIdx>=0){
+        const u=remaining[item].splice(memberIdx,1)[0];
+        reserved[key]=u;
+        frozenPins[key]={nick:u.nick,bind:false,oid:u.oid||0};
+        return;
+      }
+    }
+    let idx=-1;
+    if(pin&&pin.oid)idx=remaining[item].findIndex(u=>u&&u.oid===pin.oid&&u.bind===!!pin.bind);
+    else if(pin)idx=remaining[item].findIndex(u=>u&&u.nick===pin.nick&&!u.bind);
+    if(idx<0&&pin&&!pin.oid)idx=remaining[item].findIndex(u=>u&&u.nick===pin.nick);
+    if(idx>=0){const u=remaining[item].splice(idx,1)[0];if(!isFrozen)u.manual=true;reserved[key]=u;}
+  };
+  const frozenEntries=Object.entries(frozenPins);
+  for(const[key,pin]of frozenEntries.filter(([,pin])=>pin&&!pin.empty&&team[pin.nick]))reservePin(key,pin,true);
+  for(const[key,pin]of frozenEntries.filter(([,pin])=>!pin||pin.empty||!team[pin.nick]))reservePin(key,pin,true);
+  for(const[key,pin]of Object.entries(layoutPins))reservePin(key,pin,true);
+  for(const[key,nick]of Object.entries(pins))reservePin(key,nick,false);
+  let capacityNeeded=boxesNeeded;
+  for(const c of p.contents){
+    const occupied=Object.keys(reserved).filter(key=>key.endsWith('|||'+c)).length;
+    const last=Math.max(-1,...Object.keys(reserved).filter(key=>key.endsWith('|||'+c)).map(key=>parseInt(key.split('|||')[0])).filter(Number.isFinite));
+    capacityNeeded=Math.max(capacityNeeded,last+1,remaining[c].length+occupied);
+  }
+  boxesNeeded=p.maxBoxes?Math.max(pinLast+1,Math.min(capacityNeeded,p.maxBoxes)):capacityNeeded;
+  surplus=0;
+  for(const c of p.contents)surplus+=Math.max(0,boxesNeeded-(demands[c]||0));
+  let complete=0,bindComplete=0;
+  for(let i=0;i<boxesNeeded;i++){
+    const box=p.contents.map(c=>{
+      const key=i+'|||'+c;
+      const buyer=Object.prototype.hasOwnProperty.call(reserved,key)?reserved[key]:(remaining[c].shift()||null);
+      return {item:c,buyer};
+    });
+    const emptySlots=box.filter(s=>!s.buyer);
+    box.bindPlan=getBoxBindPlan(p,box);
+    if(!emptySlots.length){
+      if(box.some(s=>s.buyer&&s.buyer.bind)){box.status='含綁成團';bindComplete++;}
+      else{box.status='成團';complete++;}
+    } else if(box.bindPlan.length===emptySlots.length){
+      box.status='含綁成團';bindComplete++;
+    } else box.status='未成團';
+    boxes.push(box);
+  }
+
+  return {demands,buyerMap,maxDemand,minDemand,onlyAll,boxesNeeded,complete,bindComplete,surplus,boxes};
+}
+
 function renderItemsTab(g){
   let h=`<div class="card"><div class="card-header"><h3 style="margin:0">商品庫存</h3>
     <button class="bs bp" onclick="showAddItemModal(${g.id})">新增商品</button></div>
@@ -2142,13 +2570,14 @@ function renderBuyersTab(g){
   }
   const hasSur=Object.values(byB).some(d=>d.sur>0);
   const hiddenStats=new Set(g.hiddenStatsNicks||[]);
-  const allSorted=Object.entries(byB).sort((a,b)=>b[1].qty-a[1].qty);
+  const team=getTeam();
+  const allSorted=Object.entries(byB).sort((a,b)=>(team[b[0]]?1:0)-(team[a[0]]?1:0)||b[1].qty-a[1].qty);
   const sorted=allSorted.filter(([nick])=>!hiddenStats.has(nick));
   let h=`<div class="card"><h3>已成團統計 (${sorted.length})</h3>
     ${g.type==='box'?'<p class="muted" style="margin-bottom:8px">僅列入已成團／含綁成團的配，未成團不計</p>':''}`;
   const isBox=g.type==='box';
   if(!sorted.length){h+=`<div class="empty">無買家</div>`;}
-  else{const _buyers=getBuyers();for(const[nick,d]of sorted){
+  else{const _buyers=getBuyers(g.id);for(const[nick,d]of sorted){
     const bInfo=_buyers[nick];
     let buyerLine='';
     if(bInfo&&(bInfo.contact||bInfo.url||(bInfo.shots||[]).length)){
@@ -2156,7 +2585,7 @@ function renderBuyersTab(g){
       const contact=(bInfo.contact?`<span class="muted" style="font-size:12px">${esc(bInfo.contact)}</span> `:'')+link;
       const shots=(bInfo.shots||[]).map((s,i)=>`<span style="position:relative;display:inline-block">
         <img src="${s}" style="width:44px;height:44px;object-fit:cover;border-radius:5px;border:1px solid #f0d7e2;cursor:zoom-in" onclick="showImg(this.src)">
-        <span onclick="event.stopPropagation();delBuyerShot(decodeURIComponent('${encodeURIComponent(nick)}'),${i})" style="position:absolute;top:-5px;right:-5px;background:#a32d2d;color:#fff;border-radius:50%;width:14px;height:14px;display:flex;align-items:center;justify-content:center;font-size:9px;cursor:pointer">✕</span></span>`).join('');
+        <span onclick="event.stopPropagation();delBuyerShot(${g.id},decodeURIComponent('${encodeURIComponent(nick)}'),${i})" style="position:absolute;top:-5px;right:-5px;background:#a32d2d;color:#fff;border-radius:50%;width:14px;height:14px;display:flex;align-items:center;justify-content:center;font-size:9px;cursor:pointer">✕</span></span>`).join('');
       buyerLine=`<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:6px">${contact}${shots}</div>`;
     }
     h+=`<div style="margin-bottom:14px;padding:10px;background:#fef7fa;border-radius:8px">
@@ -2493,7 +2922,7 @@ function createGroup(){
   const db=loadDB();
   const dv=$('#mGDate').value; // YYYY-MM-DD
   const ds=dv?dv.replace(/-/g,'/'):'';
-  db.groups.push({id:db.nid++,name,type:$('#mGT').value,desc:$('#mGD').value.trim(),status:S().defaultStatus,createdAt:ds,deadline:$('#mGDL').value||'',officialShip:$('#mGShip').value.trim(),officialUrl:$('#mGUrl').value.trim(),cover:_gCover||'',coverPosX:parseInt($('#gCoverX')?.value)||50,coverPosY:parseInt($('#gCoverY')?.value)||50,orders:[],items:[],boxProducts:[],nOid:1,nIid:1,nBid:1});
+  db.groups.push({id:db.nid++,name,type:$('#mGT').value,desc:$('#mGD').value.trim(),status:S().defaultStatus,orderRulesVersion:2,createdAt:ds,deadline:$('#mGDL').value||'',officialShip:$('#mGShip').value.trim(),officialUrl:$('#mGUrl').value.trim(),cover:_gCover||'',coverPosX:parseInt($('#gCoverX')?.value)||50,coverPosY:parseInt($('#gCoverY')?.value)||50,orders:[],items:[],boxProducts:[],nOid:1,nIid:1,nBid:1});
   saveDB(db);closeModal();render();
 }
 function showEditGroupModal(id){
@@ -2549,9 +2978,9 @@ function bulkAdd(id){
     const bp=(g.boxProducts||[]).find(b=>b.contents.includes(item));
     const bpId=bp?bp.id:null;
     const key=nick+'|||'+item+'|||'+(bpId||'');
-    if(dupCheck[key]){alert(`批次中 ${nick} 的「${item}」重複了`);return;}
+    const alreadyOrdered=!!dupCheck[key]||g.orders.some(o=>!o.bind&&o.nick===nick&&o.item===item&&(o.bpId||null)===bpId);
+    if(alreadyOrdered&&!confirm(`${nick} 已經喊過「${item}」，仍要再新增嗎？`))return;
     dupCheck[key]=true;
-    if(g.orders.some(o=>!o.bind&&o.nick===nick&&o.item===item&&(o.bpId||null)===bpId)){alert(`${nick} 已經有「${item}」的喊單，不可重複`);return;}
     parsed.push(p);
   }
   let c=0;
@@ -2603,9 +3032,33 @@ document.addEventListener('paste',e=>{
     }
   }
 });
+function refreshMultiLiftTargets(){
+  const box=$('#mOLiftTargets');if(!box)return;
+  const g=getG(_mGid),nick=$('#mON')?.value.trim()||'';
+  const selected=checkedLiftTargetIds('.mLiftTarget');
+  const pids=[...new Set([...document.querySelectorAll('#mORows .moBp')].map(el=>parseInt(el.value)).filter(Number.isFinite))];
+  const products=(g?.boxProducts||[]).filter(p=>pids.includes(p.id)&&p.kind!=='single');
+  if(!products.length)box.innerHTML='<div class="muted" style="font-size:12px">請先選擇拆團商品</div>';
+  else box.innerHTML=products.map(p=>`<div style="margin-top:7px"><strong style="font-size:12px">${esc(p.name)}</strong><div style="margin-top:5px">${liftTargetListHtml(g,p,nick,selected,0,'mLiftTarget')}</div></div>`).join('');
+  const enabled=!!$('#mOLift')?.checked&&!usesLegacyClosedRules(g);
+  box.querySelectorAll('input').forEach(el=>el.disabled=!enabled||el.dataset.liftAvailable!=='1');
+}
+function toggleMultiLiftOptions(cb){
+  const count=$('#mOLiftCount');if(count){count.disabled=!cb.checked;if(!cb.checked)count.value=0;}
+  refreshMultiLiftTargets();
+}
+function refreshMultiMemberPriorityControls(){
+  const g=getG(_mGid),nick=$('#mON')?.value.trim()||'';
+  const available=g?.type==='box'&&!!getTeam()[nick]&&!usesLegacyClosedRules(g);
+  document.querySelectorAll('#mORows .moMemberPriorityWrap').forEach(wrap=>{
+    const cb=wrap.querySelector('.moMemberPriority');
+    wrap.style.display=available?'inline-flex':'none';
+    if(cb){cb.disabled=!available;if(!available)cb.checked=false;}
+  });
+}
 function showSingleOrderModal(id){
   const g=getG(id);_mGid=id;_mRowId=0;
-  const isBox=g.type==='box';
+  const isBox=g.type==='box',liftLocked=usesLegacyClosedRules(g);
   const nicks=[...new Set([...(isBox?Object.keys(getTeam()):[]),...g.orders.map(o=>o.nick)])];
   const bps=(g.boxProducts||[]);
   const st=S();
@@ -2614,8 +3067,8 @@ function showSingleOrderModal(id){
   openModal(`<h3>新增喊單</h3>
     <div class="form-row">
       <div class="form-group"><label>${esc(st.fieldNick)}</label><input id="mON" list="dlN"><datalist id="dlN">${nicks.map(n=>`<option value="${esc(n)}">`).join('')}</datalist></div>
-      <div class="form-group"><label>網址（選填）</label><input id="mOUrl" placeholder="FB/社群連結"></div>
-      <div class="form-group"><label>平台ID（選填）</label><input id="mOContact" placeholder="同暱稱共用"></div>
+      <div class="form-group"><label>網址（此團，選填）</label><input id="mOUrl" placeholder="FB/社群連結"></div>
+      <div class="form-group"><label>平台ID（此團，選填）</label><input id="mOContact" placeholder="只在此團使用"></div>
     </div>
     <div class="form-group" style="margin-bottom:10px"><label>喊單截圖（選填，可多張、可 Ctrl+V 貼上）</label>
       <input type="file" accept="image/*" multiple onchange="onShotFiles(this)" style="font-size:12px">
@@ -2623,8 +3076,11 @@ function showSingleOrderModal(id){
     </div>
     ${isBox?`<div style="margin-bottom:10px">
       <label style="display:inline-flex;align-items:center;gap:4px;font-size:13px;cursor:pointer;white-space:nowrap">
-        <input type="checkbox" id="mOLift">帶餘提配</label>
-      <span class="muted" style="font-size:11px;margin-left:6px">提前自己的未成團喊單，也可取代含綁缺位；普通成團不會變動</span>
+        <input type="checkbox" id="mOLift" ${liftLocked?'disabled':''} onchange="toggleMultiLiftOptions(this)">帶餘提配</label>
+      <label style="display:inline-flex;align-items:center;gap:5px;font-size:12px;margin-left:10px">任意帶餘
+        <input id="mOLiftCount" type="number" min="0" step="1" value="0" disabled style="width:68px;padding:5px 7px">顆</label>
+      <div class="muted" style="font-size:11px;margin-top:4px">數字代表每配最多承接幾顆不限款式的剩餘空位；0 為只提配指定款式。已成團原則不變，但團員可取代團外者</div>
+      ${liftLocked?'<div class="muted" style="font-size:11px;margin-top:5px;color:#a32d2d">此團已截團並鎖定舊排序，不可新增或修改帶餘提配。</div>':''}<div style="font-size:12px;font-weight:600;margin-top:8px">指定要提配的既有喊單（必選，可複選）</div><div id="mOLiftTargets" style="margin-top:5px;padding:8px;border:1px solid #ead7df;border-radius:6px"><div class="muted" style="font-size:12px">請先輸入暱稱並選擇拆團商品</div></div>
     </div>`:''}
     <div id="mORows"></div>
     <div style="margin-bottom:10px"><button class="bs" onclick="addOrderRow()">＋ 再加一筆</button></div>
@@ -2632,13 +3088,14 @@ function showSingleOrderModal(id){
   addOrderRow();
   const nickEl=$('#mON');
   const loadBuyer=()=>{
-    const b=getBuyers()[nickEl.value.trim()];
+    const b=getBuyers(_mGid)[nickEl.value.trim()];
     _mExistShots=b?(b.shots||[]):[];
     if(b&&b.contact&&!$('#mOContact').value)$('#mOContact').value=b.contact;
     if(b&&b.url&&!$('#mOUrl').value)$('#mOUrl').value=b.url;
     renderShots();
   };
-  nickEl.addEventListener('change',loadBuyer);
+  nickEl.addEventListener('input',()=>{refreshMultiLiftTargets();refreshMultiMemberPriorityControls();});
+  nickEl.addEventListener('change',()=>{loadBuyer();refreshMultiLiftTargets();refreshMultiMemberPriorityControls();});
   nickEl.addEventListener('blur',loadBuyer);
   setTimeout(()=>$('#mON').focus(),100);
 }
@@ -2658,17 +3115,17 @@ function addOrderRow(){
   let itemField;
   if(hasBps){
     itemField=`
-    <div class="form-group" style="flex:1;min-width:0"><label>商品</label>
+    <div class="form-group" style="flex:1 1 170px;min-width:150px"><label>商品</label>
       <select class="moBp" style="width:100%"><option value="">— 選擇商品 —</option>${bps.map(p=>`<option value="${p.id}" ${p.kind==='single'?'style="color:#0b7285;font-weight:bold"':''}>${esc(p.name)}${p.kind==='single'?'（單領）':p.kind==='blind'?'（全盲抽）':''}</option>`).join('')}</select></div>
-    <div class="form-group" style="flex:1;min-width:0"><label>款式</label>
+    <div class="form-group" style="flex:1 1 170px;min-width:150px"><label>款式</label>
       <select class="moI" style="width:100%" disabled><option value="">— 先選商品 —</option></select></div>`;
   } else {
-    itemField=`<div class="form-group" style="flex:1;min-width:0"><label>${esc(st.fieldItem)}</label>
+    itemField=`<div class="form-group" style="flex:1 1 220px;min-width:170px"><label>${esc(st.fieldItem)}</label>
       <input class="moI" list="dlI_${r}"><datalist id="dlI_${r}">${allItems.map(n=>`<option value="${esc(n)}">`).join('')}</datalist></div>`;
   }
   div.style.display='flex';
   div.style.position='relative';div.style.paddingRight='30px';
-  div.style.flexWrap='nowrap';
+  div.style.flexWrap='wrap';
   div.style.gap='8px';
   div.innerHTML=`
     ${itemField}
@@ -2680,7 +3137,8 @@ function addOrderRow(){
     ${isBasic?`<div class="form-group" style="flex:0 0 70px"><label>${esc(st.fieldPrice)}</label><input class="moP" type="number" min="0" placeholder="選填" style="width:70px"></div>`
       :`<div class="form-group" style="flex:0 0 56px"><label>${esc(st.fieldPrice)}</label><span class="moPrice muted" style="display:block;padding:6px 0">—</span></div>`}
     <div class="form-group" style="flex:0 0 110px"><label>${esc(st.fieldNote)}</label><input class="moNote" placeholder="選填" style="width:110px"></div>
-    ${r>0?`<button class="bs" title="刪除此筆" style="position:absolute;right:0;top:50%;transform:translateY(-50%);color:#a32d2d;padding:4px 8px" onclick="document.getElementById('mOR_${r}').remove()">✕</button>`:''}`;
+    <label class="moMemberPriorityWrap" style="display:none;align-items:center;gap:5px;flex:0 0 100%;width:100%;font-size:13px;margin-top:-2px;cursor:pointer;white-space:nowrap"><input type="checkbox" class="moMemberPriority">優先於群外</label>
+    ${r>0?`<button class="bs" title="刪除此筆" style="position:absolute;right:0;top:6px;color:#a32d2d;padding:4px 8px" onclick="document.getElementById('mOR_${r}').remove();refreshMultiLiftTargets()">✕</button>`:''}`;
   $('#mORows').appendChild(div);
   const itemEl=div.querySelector('.moI');
   const bpEl=div.querySelector('.moBp');
@@ -2712,7 +3170,7 @@ function addOrderRow(){
   if(bpEl){
     bpEl.addEventListener('change',()=>{
       const p=bps.find(b=>b.id===parseInt(bpEl.value));
-      if(!p){itemEl.innerHTML='<option value="">— 先選商品 —</option>';itemEl.disabled=true;if(allBtn)allBtn._setAll(false);updatePrice();return;}
+      if(!p){itemEl.innerHTML='<option value="">— 先選商品 —</option>';itemEl.disabled=true;if(allBtn)allBtn._setAll(false);updatePrice();refreshMultiLiftTargets();return;}
       if(allBtn){allBtn.disabled=p.kind==='single';if(p.kind==='single')allBtn._setAll(false);}
       itemEl.disabled=false;
       itemEl.innerHTML='<option value="">— 選擇款式 —</option>'+p.contents.map(c=>{
@@ -2720,12 +3178,14 @@ function addOrderRow(){
         return `<option value="${esc(c)}">${esc(c)}${price!=null?' ($'+price+')':''}</option>`;
       }).join('');
       updatePrice();
+      refreshMultiLiftTargets();
     });
   }
   if(itemEl && !isBasic){
     itemEl.addEventListener('input',updatePrice);
     itemEl.addEventListener('change',updatePrice);
   }
+  refreshMultiMemberPriorityControls();
 }
 function checkStock(g,itemName,addQty){
   if(g.type!=='carry')return null;
@@ -2753,29 +3213,36 @@ function addMultiOrder(){
     const priceEl=row.querySelector('.moP');
     const price=priceEl?parseFloat(priceEl.value)||0:lookupPrice(g,item,bpId)||0;
     const note=(row.querySelector('.moNote')?.value||'').trim();
-    entries.push({item,qty,all,price,note,bpId});
+    const memberPriority=!!getTeam()[nick]&&!!row.querySelector('.moMemberPriority')?.checked&&!usesLegacyClosedRules(g);
+    entries.push({item,qty,all,price,note,bpId,memberPriority});
   }
   if(!entries.length){alert(`請至少填一筆${_s.fieldItem}`);return;}
   const seen=new Set();
   for(const e of entries){
     const key=e.item+'|||'+(e.bpId||'');
-    if(seen.has(key)){alert(`同一筆喊單中「${e.item}」重複了`);return;}
+    const alreadyOrdered=seen.has(key)||g.orders.some(o=>!o.bind&&o.nick===nick&&o.item===e.item&&(o.bpId||null)===(e.bpId||null));
+    if(alreadyOrdered&&!confirm(`${nick} 已經喊過「${e.item}」，仍要再新增嗎？`))return;
     seen.add(key);
-    if(g.orders.some(o=>!o.bind&&o.nick===nick&&o.item===e.item&&(o.bpId||null)===(e.bpId||null))){alert(`${nick} 已經有「${e.item}」的喊單，不可重複`);return;}
 
   }
   const isLift=!!$('#mOLift')?.checked;
+  const liftCount=isLift?Math.max(0,parseInt($('#mOLiftCount')?.value)||0):0;
+  const liftTargets=isLift?checkedLiftTargetIds('.mLiftTarget'):[];
   if(isLift){
+    if(!liftTargets.length){alert('請至少指定一筆要提配的喊單');return;}
     for(const e of entries){
       const p=e.bpId?(g.boxProducts||[]).find(b=>b.id===e.bpId):(g.boxProducts||[]).find(b=>b.contents.includes(e.item));
       if(!p){alert(`「${e.item}」未對應任何商品，無法帶餘提配`);return;}
       if(!hasUnconfirmedOrders(g,p,nick)){alert(`${nick} 在「${p.name}」沒有可提配的喊單，無法提配`);return;}
+      const candidateIds=new Set(getLiftCandidateOrders(g,p,nick).map(o=>o.id));
+      if(!liftTargets.some(id=>candidateIds.has(id))){alert(`請替「${p.name}」至少指定一筆目前可提配的喊單`);return;}
     }
   }
   const contact=$('#mOContact')?.value.trim()||'';
   const url=$('#mOUrl')?.value.trim()||'';
-  if(contact||url||_mShots.length)updateBuyer(nick,contact,url,_mShots);
+  if(contact||url||_mShots.length)updateBuyer(_mGid,nick,contact,url,_mShots);
   upG(_mGid,g=>{
+    if(isLift)g.orderRulesVersion=2;
     const affected=new Set();
     for(const e of entries){
       const product=e.bpId?(g.boxProducts||[]).find(b=>b.id===e.bpId):(g.boxProducts||[]).find(b=>b.contents.includes(e.item));
@@ -2786,13 +3253,35 @@ function addMultiOrder(){
     for(const e of entries){
       const product=e.bpId?(g.boxProducts||[]).find(b=>b.id===e.bpId):(g.boxProducts||[]).find(b=>b.contents.includes(e.item));
       if(product&&product.kind!=='single')clearAutoBindOrders(g,product,e.item,e.all?null:e.qty);
-      g.orders.push({id:g.nOid++,nick,item:e.item,series:'',qty:e.qty,price:e.price,note:e.note,bpId:e.bpId,all:e.all,lift:isLift,ts:Date.now()});
+      g.orders.push({id:g.nOid++,nick,item:e.item,series:'',qty:e.qty,price:e.price,note:e.note,bpId:e.bpId,all:e.all,lift:isLift,liftCount,liftTargets:isLift?[...liftTargets]:[],memberPriority:e.memberPriority,ts:Date.now()});
     }
   });
   closeModal();render();
 }
+function refreshEditLiftTargets(gid,oid){
+  const box=$('#eOLiftTargets');if(!box)return;
+  const g=getG(gid),o=g?.orders.find(x=>x.id===oid);if(!g||!o)return;
+  const p=o.bpId?(g.boxProducts||[]).find(x=>x.id===o.bpId):(g.boxProducts||[]).find(x=>x.contents.includes(o.item));
+  const nick=$('#eON')?.value.trim()||o.nick;
+  const selected=box.dataset.nick===nick?checkedLiftTargetIds('.eLiftTarget'):(nick===o.nick?(o.liftTargets||[]):[]);
+  box.innerHTML=p?liftTargetListHtml(g,p,nick,selected,oid,'eLiftTarget'):'<div class="muted" style="font-size:12px">找不到所屬拆團商品</div>';
+  box.dataset.nick=nick;
+  const enabled=!!$('#eOLift')?.checked&&!usesLegacyClosedRules(g);
+  box.querySelectorAll('input').forEach(el=>el.disabled=!enabled||el.dataset.liftAvailable!=='1');
+}
+function toggleEditLiftOptions(cb,gid,oid){
+  const count=$('#eOLiftCount');if(count){count.disabled=!cb.checked;if(!cb.checked)count.value=0;}
+  refreshEditLiftTargets(gid,oid);
+}
+function refreshEditMemberPriority(gid){
+  const wrap=$('#eOMemberPriorityWrap'),cb=$('#eOMemberPriority');if(!wrap||!cb)return;
+  const g=getG(gid),nick=$('#eON')?.value.trim()||'';
+  const available=g?.type==='box'&&!!getTeam()[nick]&&!usesLegacyClosedRules(g);
+  wrap.style.display=available?'inline-flex':'none';cb.disabled=!available;if(!available)cb.checked=false;
+}
 function showEditOrderModal(gid,oid){
   const g=getG(gid),o=g.orders.find(x=>x.id===oid);if(!o)return;
+  const liftLocked=usesLegacyClosedRules(g);
   const product=o.bpId?(g.boxProducts||[]).find(p=>p.id===o.bpId):(g.boxProducts||[]).find(p=>p.contents.includes(o.item));
   const canAll=g.type==='box'&&product&&product.kind!=='single';
   const st=S();
@@ -2805,12 +3294,21 @@ function showEditOrderModal(gid,oid){
       <div class="form-group"><label>${esc(st.fieldPrice)}</label><input id="eOP" type="number" min="0" value="${o.price||''}"></div>
       <div class="form-group"><label>${esc(st.fieldNote)}</label><input id="eONote" value="${esc(o.note||'')}"></div></div>
     <div class="form-group" style="margin-bottom:10px"><label>喊單時間</label><input id="eOTs" type="datetime-local" step="60" value="${localDateTimeValue(o.ts)}"></div>
+    <label id="eOMemberPriorityWrap" style="display:none;align-items:center;gap:5px;font-size:13px;margin:0 0 10px;cursor:pointer"><input type="checkbox" id="eOMemberPriority" ${o.memberPriority?'checked':''}>優先於群外</label>
     ${g.type==='box'?`<div style="margin-bottom:10px">
       <label style="display:inline-flex;align-items:center;gap:4px;font-size:13px;cursor:pointer;white-space:nowrap">
-        <input type="checkbox" id="eOLift" ${o.lift||o.bindLift?'checked':''}>帶餘提配</label>
-      <span class="muted" style="font-size:11px;margin-left:6px">也可取代含綁缺位，普通成團不會變動</span>
+        <input type="checkbox" id="eOLift" ${o.lift||o.bindLift?'checked':''} ${liftLocked?'disabled':''} onchange="toggleEditLiftOptions(this,${gid},${oid})">帶餘提配</label>
+      <label style="display:inline-flex;align-items:center;gap:5px;font-size:12px;margin-left:10px">任意帶餘
+        <input id="eOLiftCount" type="number" min="0" step="1" value="${Math.max(0,parseInt(o.liftCount)||0)}" ${liftLocked||!(o.lift||o.bindLift)?'disabled':''} style="width:68px;padding:5px 7px">顆</label>
+      <div class="muted" style="font-size:11px;margin-top:4px">數字代表每配最多承接幾顆不限款式的剩餘空位；0 為只提配指定款式。已成團原則不變，但團員可取代團外者</div>
+      ${liftLocked?'<div class="muted" style="font-size:11px;margin-top:5px;color:#a32d2d">此團已截團並鎖定舊排序，不可新增或修改帶餘提配。</div>':''}<div style="font-size:12px;font-weight:600;margin-top:8px">指定要提配的既有喊單（必選，可複選）</div><div id="eOLiftTargets" style="margin-top:5px;padding:8px;border:1px solid #ead7df;border-radius:6px"><div class="muted" style="font-size:12px">載入可提配喊單...</div></div>
     </div>`:''}
     <div class="btn-row"><button class="bp" onclick="saveOrderEdit(${gid},${oid})">儲存</button><button onclick="closeModal()">取消</button></div>`);
+  if(g.type==='box'){
+    $('#eON').addEventListener('input',()=>{refreshEditLiftTargets(gid,oid);refreshEditMemberPriority(gid);});
+    refreshEditLiftTargets(gid,oid);
+  }
+  refreshEditMemberPriority(gid);
 }
 function saveOrderEdit(gid,oid){
   const g=getG(gid);const o=g.orders.find(x=>x.id===oid);if(!o)return;
@@ -2819,17 +3317,32 @@ function saveOrderEdit(gid,oid){
   const newQty=parseInt($('#eOQ').value)||1;
   const newAll=!!$('#eOAll')?.checked;
   const newTs=new Date($('#eOTs').value).getTime();
+  const memberPriority=!!getTeam()[newNick]&&!!$('#eOMemberPriority')?.checked&&!usesLegacyClosedRules(g);
   if(!Number.isFinite(newTs)){alert('請輸入正確的喊單時間');return;}
   if(newItem!==o.item||newNick!==o.nick){
-    if(g.orders.some(x=>x.id!==oid&&x.nick===newNick&&x.item===newItem&&(x.bpId||null)===(o.bpId||null))){alert(`${newNick} 已經有「${newItem}」的喊單，不可重複`);return;}
+    if(g.orders.some(x=>x.id!==oid&&x.nick===newNick&&x.item===newItem&&(x.bpId||null)===(o.bpId||null))&&!confirm(`${newNick} 已經喊過「${newItem}」，仍要儲存嗎？`))return;
   }
   const isLift=!!$('#eOLift')?.checked;
+  const liftCount=isLift?Math.max(0,parseInt($('#eOLiftCount')?.value)||0):0;
+  const liftTargets=isLift?checkedLiftTargetIds('.eLiftTarget'):[];
+  const product=o.bpId?(g.boxProducts||[]).find(p=>p.id===o.bpId):(g.boxProducts||[]).find(p=>p.contents.includes(o.item));
+  if(isLift&&!usesLegacyClosedRules(g)){
+    const candidateIds=new Set(product?getLiftCandidateOrders(g,product,newNick,oid).map(o=>o.id):[]);
+    for(const id of(Array.isArray(o.liftTargets)?o.liftTargets:[])){
+      const target=g.orders.find(x=>x.id===Number(id));
+      if(target&&product&&target.nick===newNick&&!target.bind&&orderMatches(product,target))candidateIds.add(Number(id));
+    }
+    if(!candidateIds.size){alert(`${newNick} 在「${product?.name||'此商品'}」沒有可提配的喊單，無法提配`);return;}
+    if(!liftTargets.some(id=>candidateIds.has(id))){alert('請至少指定一筆目前可提配的喊單');return;}
+  }
   upG(gid,g=>{const o=g.orders.find(x=>x.id===oid);if(!o)return;
     const product=o.bpId?(g.boxProducts||[]).find(p=>p.id===o.bpId):(g.boxProducts||[]).find(p=>p.contents.includes(o.item));
     if(product&&product.kind!=='single'){freezeConfirmedBoxes(g,product);clearAutoBindOrders(g,product,newItem,newAll?null:(newItem===o.item?Math.max(0,newQty-o.qty):newQty));}
     o.nick=newNick;o.item=newItem;
     o.qty=newAll?1:newQty;o.all=newAll;o.price=parseFloat($('#eOP').value)||0;o.note=$('#eONote').value.trim();o.ts=newTs;
-    o.lift=isLift;delete o.bindLift;});
+    o.lift=isLift;o.liftCount=liftCount;
+    if(!usesLegacyClosedRules(g)){o.liftTargets=isLift?[...liftTargets]:[];o.memberPriority=memberPriority;if(isLift)g.orderRulesVersion=2;}
+    delete o.bindLift;});
   closeModal();render();
 }
 function delOrder(gid,oid){if(!confirm('刪除？'))return;upG(gid,g=>{g.orders=g.orders.filter(o=>o.id!==oid);});render();}
@@ -3041,26 +3554,7 @@ function imgFileToData(f,cb,max,quality){
   };
   reader.readAsDataURL(f);
 }
-function getBuyers(){return loadDB().buyers||{};}
-function updateBuyer(nick,contact,url,addShots){
-  const db=loadDB();
-  if(!db.buyers)db.buyers={};
-  const b=db.buyers[nick]||{contact:'',url:'',shots:[]};
-  if(contact)b.contact=contact;
-  if(url)b.url=url;
-  if(addShots&&addShots.length)b.shots=(b.shots||[]).concat(addShots);
-  db.buyers[nick]=b;
-  saveDB(db);
-}
-function delBuyerShot(nick,idx){
-  if(!confirm('刪除這張截圖？'))return;
-  const db=loadDB();
-  if(db.buyers&&db.buyers[nick]&&db.buyers[nick].shots){
-    db.buyers[nick].shots.splice(idx,1);
-    saveDB(db);
-  }
-  render();
-}
+
 function setBpImgFile(f){
   if(!f)return;
   const reader=new FileReader();
@@ -3639,12 +4133,12 @@ function aggregateProductSlots(g,p,slots){
   for(const s of slots){
     if(!s||!s.buyer)continue;
     const priced=productSlotPrice(g,p,s);
-    const key=JSON.stringify([s.buyer.nick,s.item,!!s.buyer.bind,priced.price,priced.custom]);
+    const key=JSON.stringify([s.buyer.nick,s.item,!!s.buyer.bind,!!s.buyer.liftExtra,priced.price,priced.custom]);
     agg.set(key,(agg.get(key)||0)+1);
   }
   return [...agg.entries()].map(([key,qty])=>{
-    const[nick,item,bind,price,rowPrice]=JSON.parse(key);
-    return {nick,item,qty,price,note:bind?'綁':'',bpId:p.id,bind,rowPrice};
+    const[nick,item,bind,liftExtra,price,rowPrice]=JSON.parse(key);
+    return {nick,item,qty,price,note:bind?'綁':liftExtra?'帶餘':'',bpId:p.id,bind,liftExtra,rowPrice};
   });
 }
 function getRegularProductConfirmedOrders(g,p){
