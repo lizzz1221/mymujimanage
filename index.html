@@ -22,6 +22,7 @@ h3{font-size:15px;font-weight:500;margin-bottom:.5rem}
 
 label{display:block;font-size:.95em;color:var(--ink-soft);margin-bottom:3px}
 input,select,textarea{width:100%;padding:7px 10px;border:1px solid var(--line);border-radius:10px;font-size:.95em;background:#fff;color:var(--ink);outline:none;font-family:inherit}
+input[type=checkbox],input[type=radio]{width:16px;height:16px;min-width:16px;padding:0;margin:0;flex:0 0 16px;accent-color:var(--accent)}
 input:focus,select:focus,textarea:focus{border-color:var(--accent);box-shadow:0 0 0 2px rgba(201,137,159,.14)}
 textarea{resize:vertical;min-height:60px;line-height:1.7}
 
@@ -77,7 +78,7 @@ td input,td select{padding:4px 6px;font-size:.95em;border-radius:6px}
 .group-hero-cover{width:100%;height:230px;object-fit:cover;display:block;background:var(--sky-soft)}
 .group-hero-ph{height:120px;background:var(--sky-soft)}
 .group-hero-main{padding:14px 16px}
-.group-hero-title{font-size:26px;font-weight:700;line-height:1.25;color:var(--ink);margin-right:8px}
+.group-hero-title{font-size:26px;font-weight:700;line-height:1.25;color:var(--ink);margin-right:8px;overflow-wrap:anywhere}
 .group-hero-meta{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:6px}
 .group-note{margin-top:10px;padding:7px 10px;background:#fdf1f6;border-left:3px solid var(--sky);border-radius:8px;color:var(--ink-soft);font-size:.9em}
 
@@ -91,9 +92,14 @@ td input,td select{padding:4px 6px;font-size:.95em;border-radius:6px}
 .group-card .top{display:flex;justify-content:space-between;align-items:flex-start;gap:6px}
 .group-card .name{font-size:1em;font-weight:500;line-height:1.35}
 .group-card .meta{display:flex;gap:6px 10px;font-size:.85em;color:var(--ink-soft);flex-wrap:wrap;margin-top:auto}
+@media(min-width:800px){
+  .app{max-width:1120px}
+  .group-grid{grid-template-columns:repeat(auto-fill,minmax(260px,1fr))}
+  .group-card .name{overflow-wrap:anywhere}
+}
 
-.tabs{display:flex;gap:2px;margin-bottom:1rem;border-bottom:2px solid var(--accent-soft);flex-wrap:wrap}
-.tab{padding:6px 14px;cursor:pointer;border:none;background:none;font-size:.95em;color:var(--ink-soft);border-bottom:2px solid transparent;margin-bottom:-2px;border-radius:10px 10px 0 0}
+.tabs{display:flex;gap:2px;margin-bottom:1rem;border-bottom:2px solid var(--accent-soft);flex-wrap:nowrap;overflow-x:auto;scrollbar-width:thin;scrollbar-color:var(--line) transparent}
+.tab{padding:6px 14px;cursor:pointer;border:none;background:none;font-size:.95em;color:var(--ink-soft);border-bottom:2px solid transparent;margin-bottom:-2px;border-radius:10px 10px 0 0;flex:0 0 auto}
 .tab:hover{color:var(--ink);background:var(--cream)}
 .tab.active{color:var(--accent);border-bottom-color:var(--accent);font-weight:500}
 
@@ -142,9 +148,18 @@ td input,td select{padding:4px 6px;font-size:.95em;border-radius:6px}
 .twisty{width:0;height:0;border-top:4px solid transparent;border-bottom:4px solid transparent;border-left:7px solid #888780;display:inline-block;transition:transform .12s;flex-shrink:0}
 .twisty.open{transform:rotate(90deg)}
 @media(max-width:640px){
+  .app{padding:.75rem}
+  .card{padding:1rem}
+  .modal{width:94%;padding:1rem;border-radius:14px}
+  .group-hero-title{font-size:22px}
   .bp-detail{flex-direction:column;align-items:center}
   .bp-detail-img{width:180px;max-width:70%}
   .bp-detail>div{width:100%}
+  .box-product{padding:10px}
+  .setting-control{width:100%;min-width:0}
+}
+@media(max-width:480px){
+  .form-row{grid-template-columns:1fr}
 }
 
 td .slot-del{display:none;color:#d16277;cursor:pointer;margin-left:4px;font-weight:bold}
@@ -495,6 +510,7 @@ function loadDB(){
   }
 
   if(!db.fixedTeam)db.fixedTeam={};
+  if(!db.teamAdmins)db.teamAdmins={};
   if(!db.teamNotes)db.teamNotes={};
   if(!db.teamJoinedAt)db.teamJoinedAt={};
   if(!db.units)db.units=[]; // 團體庫：{id,name,icon}
@@ -902,6 +918,7 @@ function buildViewerDataJs(){
     groups,
     nid:db.nid,
     fixedTeam:db.fixedTeam||{},
+    teamAdmins:db.teamAdmins||{},
     teamJoinedAt:db.teamJoinedAt||{},
     teamNotes:{},
 
@@ -968,7 +985,7 @@ function importFullBackup(input){
 }
 function preserveMissingAdminLibraries(incoming){
   const current=loadDB();
-  for(const key of ['roles','roleUnits','units','unitNid','teamJoinedAt']){
+  for(const key of ['roles','roleUnits','units','unitNid','teamJoinedAt','teamAdmins']){
     if(!Object.prototype.hasOwnProperty.call(incoming,key)&&Object.prototype.hasOwnProperty.call(current,key)){
       incoming[key]=JSON.parse(JSON.stringify(current[key]));
     }
@@ -1183,6 +1200,7 @@ async function githubPushData(){
   }
 }
 function getTeam(){return loadDB().fixedTeam||{};}
+function getTeamAdmins(){return loadDB().teamAdmins||{};}
 function ftStyles(){
   const db=loadDB();
   return[...new Set(db.groups.flatMap(g=>(g.boxProducts||[]).flatMap(p=>p.contents)))];
@@ -1201,6 +1219,7 @@ function ftMemberBlock(nick,slots){
   return `<div class="ft-member" data-nick="${esc(nick)}" style="margin-bottom:10px;padding:8px;background:#fef7fa;border:1px solid var(--line);border-radius:8px">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;gap:8px"><strong style="color:#a32d2d">${esc(nick)}</strong>
       <button class="bs" style="color:#a32d2d" onclick="removeFixedMember(this)">移除成員</button></div>
+    <label style="display:inline-flex;align-items:center;gap:5px;font-size:13px;margin:0 0 8px;cursor:pointer"><input type="checkbox" class="ftAdmin" ${_ftAdmins[nick]?'checked':''}>管理員</label>
     <div class="ftSlots" style="display:flex;flex-wrap:wrap;gap:4px 8px">
       ${Object.entries(slots).map(([s,pos])=>ftSlotChip(s,pos)).join('')}
     </div>
@@ -1310,7 +1329,7 @@ function ftAddSlot(btn){
   const posObj=pos==='pick'?{t:'pick'}:{t:'slot',r:parseInt(pos.slice(5))||1};
   member.querySelector('.ftSlots').insertAdjacentHTML('beforeend',ftSlotChip(s,posObj));
 }
-let _ftTeam={},_ftNotes={},_ftJoinedAt={},_ftPass={};
+let _ftTeam={},_ftAdmins={},_ftNotes={},_ftJoinedAt={},_ftPass={};
 // 固位 pass 統計：特殊團（★）截團後，固位成員沒喊自己固位角色的商品即算一次 pass（連續累計）
 // 只要在較新的特殊團裡有喊該角色，之前累積的 pass 次數就歸零重新算起
 // 條件：該團有販售該角色（在某商品的款式中）；有喊單（綁單不算）即中斷連續紀錄
@@ -1347,6 +1366,7 @@ function ftOverviewRow(nick,slots){
     `<span class="badge ${n>=2?'b-red':'b-amber'}" title="★${esc(s)} pass ${n} 次${n>=2?'，建議撤銷固位':''}">${n>=2?'⚠ ':''}★${esc(s)}×${n}</span>`).join(' ');
   return `<div class="ft-row" data-nick="${esc(nick)}" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:6px 8px;border-bottom:.5px solid #fdf1f6">
     <strong style="color:#a32d2d;white-space:nowrap">${esc(nick)}</strong>
+    ${_ftAdmins[nick]?'<span class="badge b-red">管理員</span>':''}
     <span class="muted" style="font-size:11px;white-space:nowrap">${joined}</span>
     <span style="flex:1;min-width:120px;font-size:12px">${summary}</span>
     ${passHtml}
@@ -1371,16 +1391,18 @@ function readFixedMemberBlock(member){
   const dateValue=member.querySelector('.ftJoinedAt')?.value;
   const previous=Number(_ftJoinedAt[nick])||0;
   const joinedAt=dateValue===localDateValue(previous)?previous:(dateValue?new Date(dateValue+'T00:00:00').getTime():Date.now());
-  return {nick,slots,note,joinedAt};
+  return {nick,slots,admin:!!member.querySelector('.ftAdmin')?.checked,note,joinedAt};
 }
 function saveFixedMember(btn){
   const member=btn.closest('.ft-member');if(!member)return;
   const data=readFixedMemberBlock(member),db=loadDB();
   db.fixedTeam[data.nick]=data.slots;
+  if(data.admin)db.teamAdmins[data.nick]=true;else delete db.teamAdmins[data.nick];
   if(data.note)db.teamNotes[data.nick]=data.note;else delete db.teamNotes[data.nick];
   db.teamJoinedAt[data.nick]=data.joinedAt;
   saveDB(db);
   _ftTeam[data.nick]=data.slots;
+  if(data.admin)_ftAdmins[data.nick]=true;else delete _ftAdmins[data.nick];
   if(data.note)_ftNotes[data.nick]=data.note;else delete _ftNotes[data.nick];
   _ftJoinedAt[data.nick]=data.joinedAt;
   _ftPass=passStats();
@@ -1398,9 +1420,9 @@ function removeFixedMember(btn){
   const nick=member.dataset.nick;
   if(!confirm(`從固團成員移除「${nick}」？\n既有喊單不會刪除，但之後不再套用固位或撿漏順位。`))return;
   const db=loadDB();
-  delete db.fixedTeam[nick];delete db.teamNotes[nick];delete db.teamJoinedAt[nick];
+  delete db.fixedTeam[nick];delete db.teamAdmins[nick];delete db.teamNotes[nick];delete db.teamJoinedAt[nick];
   saveDB(db);
-  delete _ftTeam[nick];delete _ftNotes[nick];delete _ftJoinedAt[nick];
+  delete _ftTeam[nick];delete _ftAdmins[nick];delete _ftNotes[nick];delete _ftJoinedAt[nick];
   member.remove();filterFixedMembers();render();
 }
 let _ftView='style',_ftSearch='';
@@ -1457,7 +1479,7 @@ function filterFixedMembers(){
 function stashFixedTeamForm(){
   if(!$('#ftList'))return;
   const current=collectFixedTeamForm();
-  _ftTeam=current.team;_ftNotes=current.notes;_ftJoinedAt=current.joinedAt;
+  _ftTeam=current.team;_ftAdmins=current.admins;_ftNotes=current.notes;_ftJoinedAt=current.joinedAt;
 }
 function switchFtView(v){
   if(_ftView==='member')stashFixedTeamForm();
@@ -1466,6 +1488,7 @@ function switchFtView(v){
 function showFixedTeamModal(keepTeam){
   if(!keepTeam){
     _ftTeam=JSON.parse(JSON.stringify(getTeam()));
+    _ftAdmins=JSON.parse(JSON.stringify(loadDB().teamAdmins||{}));
     _ftNotes=JSON.parse(JSON.stringify(loadDB().teamNotes||{}));
     _ftJoinedAt=JSON.parse(JSON.stringify(loadDB().teamJoinedAt||{}));
   }
@@ -1504,19 +1527,20 @@ function addTeamMember(){
     alert('成員已存在');return;
   }
   const joinedAt=Date.now();
-  db.fixedTeam[nick]={};db.teamJoinedAt[nick]=joinedAt;
+  db.fixedTeam[nick]={};db.teamJoinedAt[nick]=joinedAt;delete db.teamAdmins[nick];
   saveDB(db);
-  _ftTeam[nick]={};_ftJoinedAt[nick]=joinedAt;delete _ftNotes[nick];
+  _ftTeam[nick]={};_ftJoinedAt[nick]=joinedAt;delete _ftAdmins[nick];delete _ftNotes[nick];
   $('#ftList').insertAdjacentHTML('beforeend',ftMemberBlock(nick,{}));
   $('#ftNick').value='';
   filterFixedMembers();render();
 }
 function collectFixedTeamForm(){
-  const team={},notes={},joinedAt={};
+  const team={},admins={},notes={},joinedAt={};
   document.querySelectorAll('#ftList .ft-row,#ftList .ft-member').forEach(el=>{
     const nick=el.dataset.nick;
     if(el.classList.contains('ft-row')){
       team[nick]=_ftTeam[nick]||{};
+      if(_ftAdmins[nick])admins[nick]=true;
       if(_ftNotes[nick])notes[nick]=_ftNotes[nick];
       joinedAt[nick]=Number(_ftJoinedAt[nick])||Date.now();
       return;
@@ -1529,13 +1553,14 @@ function collectFixedTeamForm(){
       else if(value.startsWith('slot:'))slots[style]={t:'slot',r:parseInt(value.slice(5))||1};
     });
     team[nick]=slots;
+    if(el.querySelector('.ftAdmin')?.checked)admins[nick]=true;
     const note=el.querySelector('.ftNote')?.value.trim();
     if(note)notes[nick]=note;
     const dateValue=el.querySelector('.ftJoinedAt')?.value;
     const previous=Number(_ftJoinedAt[nick])||0;
     joinedAt[nick]=dateValue===localDateValue(previous)?previous:(dateValue?new Date(dateValue+'T00:00:00').getTime():Date.now());
   });
-  return {team,notes,joinedAt};
+  return {team,admins,notes,joinedAt};
 }
 function nicknameInUse(db,nick){
   if(Object.prototype.hasOwnProperty.call(db.fixedTeam||{},nick))return true;
@@ -1559,6 +1584,10 @@ function renameStoredNickFields(value,oldNick,newNick,seen=new WeakSet()){
 function renameMemberEverywhere(db,oldNick,newNick){
   db.fixedTeam[newNick]=db.fixedTeam[oldNick]||{};
   delete db.fixedTeam[oldNick];
+  if(Object.prototype.hasOwnProperty.call(db.teamAdmins||{},oldNick)){
+    db.teamAdmins[newNick]=db.teamAdmins[oldNick];
+    delete db.teamAdmins[oldNick];
+  }
   if(Object.prototype.hasOwnProperty.call(db.teamNotes||{},oldNick)){
     db.teamNotes[newNick]=db.teamNotes[oldNick];
     delete db.teamNotes[oldNick];
@@ -1607,7 +1636,7 @@ function renameFixedMember(oldNickEnc){
   if(!newNick){alert('新名字不可空白');return;}
   if(newNick===oldNick)return;
   const current=collectFixedTeamForm();
-  _ftTeam=current.team;_ftNotes=current.notes;_ftJoinedAt=current.joinedAt;
+  _ftTeam=current.team;_ftAdmins=current.admins;_ftNotes=current.notes;_ftJoinedAt=current.joinedAt;
   const db=loadDB();
   if(Object.prototype.hasOwnProperty.call(_ftTeam,newNick)||nicknameInUse(db,newNick)){
     alert(`「${newNick}」已經有人使用，不能直接合併。`);return;
@@ -1615,6 +1644,7 @@ function renameFixedMember(oldNickEnc){
   if(!confirm(`確定將「${oldNick}」改成「${newNick}」？\n\n所有團的既有喊單、付款、貨況與配單位置會一起更新。`))return;
   renameMemberEverywhere(db,oldNick,newNick);
   _ftTeam[newNick]=_ftTeam[oldNick]||{};delete _ftTeam[oldNick];
+  if(_ftAdmins[oldNick])_ftAdmins[newNick]=true;delete _ftAdmins[oldNick];
   if(Object.prototype.hasOwnProperty.call(_ftNotes,oldNick)){
     _ftNotes[newNick]=_ftNotes[oldNick];delete _ftNotes[oldNick];
   }
@@ -2428,11 +2458,14 @@ function stabilizeConfirmedBoxes(g){
   return repaired;
 }
 
-function boxOrderPriority(g,item,e,team){
+function boxOrderPriority(g,item,e,team,admins){
   let type=null,rank=0;
   const member=team[e.nick];
   const pos=member?member[item]:null;
-  if(pos){type=pos.t==='slot'&&e.cancelFixed?'pick':pos.t;rank=pos.r||0;}
+  const adminMap=admins||(typeof getTeamAdmins==='function'?getTeamAdmins():{});
+  const isAdmin=!!member&&!!adminMap[e.nick];
+  if(isAdmin)type='admin';
+  else if(pos){type=pos.t==='slot'&&e.cancelFixed?'pick':pos.t;rank=pos.r||0;}
   else if(e.fixed){
     const applies=e.fixedItems&&e.fixedItems.length?e.fixedItems.includes(item):true;
     if(applies){type=e.fixed==='slot'?'slot':'pick';rank=e.fixedRank||0;}
@@ -2441,10 +2474,11 @@ function boxOrderPriority(g,item,e,team){
   const fixedActive=!g.fixEnded||(g.fixEndAt!=null&&e.oid<g.fixEndAt);
   let cls=3;
   if(e.bind)cls=5;
+  else if(type==='admin')cls=-1;
   else if(type==='slot')cls=fixedActive?0:1;
   else if(type==='pick')cls=1;
   else if(type==='member')cls=usesLegacyClosedRules(g)||e.memberPriority?2:3;
-  return {cls,rank};
+  return isAdmin?{cls,rank,isAdmin:true}:{cls,rank};
 }
 function boxOrderTime(o){
   const ts=Number(o?.ts);if(Number.isFinite(ts)&&ts>0)return ts;
@@ -2509,14 +2543,15 @@ function calcBoxesLegacy(g,p){
   for(const c of p.contents) surplus+=Math.max(0,boxesNeeded-(demands[c]||0));
 
   const rule=p.sortRule||'fifo';
-  const team=getTeam();
+  const team=getTeam(),admins=typeof getTeamAdmins==='function'?getTeamAdmins():{};
   const boxes=[];
   const remaining={};
   for(const c of p.contents){
     for(const e of (buyerMap[c]||[])){
-      const priority=boxOrderPriority(g,c,e,team);
+      const priority=boxOrderPriority(g,c,e,team,admins);
       e._cls=priority.cls;
       e._rank=priority.rank;
+      e._isAdmin=!!priority.isAdmin;
       e._isTeam=!!team[e.nick];
     }
     const sortFn=(a,b)=>compareBoxOrders(a,b,rule,distinct);
@@ -2539,7 +2574,7 @@ function calcBoxesLegacy(g,p){
     for(const b of sorted){
       const qty=b.all?((frozenAll[b.oid]||0)+(b===allWinner?winnerExtra:0)):b.qty;
       if(b.all){b.qty=qty;if(qty)demands[c]+=qty;}
-      for(let i=0;i<qty;i++) remaining[c].push({nick:b.nick,all:b.all,bind:b.bind,fixed:b.fixed,isLift:b.all?false:b.isLift,oid:b.oid});
+      for(let i=0;i<qty;i++) remaining[c].push({nick:b.nick,all:b.all,bind:b.bind,fixed:b.fixed,isLift:b.all?false:b.isLift,isAdmin:!!b._isAdmin,oid:b.oid});
     }
   }
   const minNoLift=p.contents.length?Math.min(...p.contents.map(c=>(demands[c]||0)-(liftAdd[c]||0))):0;
@@ -2717,7 +2752,7 @@ function calcBoxes(g,p){
     seq++;
   }
   const rule=p.sortRule||'fifo';
-  const team=getTeam();
+  const team=getTeam(),admins=typeof getTeamAdmins==='function'?getTeamAdmins():{};
   const sortedMap={};const allWinnerMap={};
   let effectiveNonAllOrderCount=0;
   const compareAllBoundary=(a,b)=>{
@@ -2727,10 +2762,11 @@ function calcBoxes(g,p){
   };
   for(const c of p.contents){
     for(const e of (buyerMap[c]||[])){
-      const priority=boxOrderPriority(g,c,e,team);
+      const priority=boxOrderPriority(g,c,e,team,admins);
       e._cls=priority.cls;
       e._rank=priority.rank;
       e._isTeam=!!team[e.nick];
+      e._isAdmin=!!priority.isAdmin;
     }
     const sortFn=(a,b)=>compareBoxOrders(a,b,rule,distinct);
     const sorted=[...(buyerMap[c]||[])].sort(sortFn);
@@ -2841,7 +2877,7 @@ function calcBoxes(g,p){
           liftOverflow=!isLift;
           liftUnitUsed[key]=used+1;
         }
-        remaining[c].push({nick:b.nick,all:b.all,bind:b.bind,fixed:b.fixed,isLift,liftOverflow,allRemainder:b.all&&b.isLiftTarget&&!isLift,memberPriority:!!b.memberPriority,priorityCls:b._cls,priorityRank:b._rank||0,oid:b.oid});
+        remaining[c].push({nick:b.nick,all:b.all,bind:b.bind,fixed:b.fixed,isLift,liftOverflow,allRemainder:b.all&&b.isLiftTarget&&!isLift,memberPriority:!!b.memberPriority,isAdmin:!!b._isAdmin,priorityCls:b._cls,priorityRank:b._rank||0,oid:b.oid});
       }
     }
   }
@@ -2929,10 +2965,13 @@ function calcBoxes(g,p){
     if(pin&&pin.empty){reserved[key]=null;return;}
     if(isFrozen&&pin&&!pin.empty&&!pin.bind&&!g.fixEnded){
       const pinnedOrder=pin.oid?orderById.get(pin.oid):null;
-      const pinnedPriority=pinnedOrder?boxOrderPriority(g,item,{...pinnedOrder,oid:pinnedOrder.id},team):{cls:3,rank:0};
-      const slotIdx=remaining[item].findIndex(u=>u&&!u.bind&&(u.priorityCls??3)===0&&(
-        pinnedPriority.cls>0||((u.priorityRank||0)<(pinnedPriority.rank||0))
-      ));
+      const pinnedPriority=pinnedOrder?boxOrderPriority(g,item,{...pinnedOrder,oid:pinnedOrder.id},team,admins):{cls:3,rank:0};
+      const slotIdx=remaining[item].findIndex(u=>{
+        if(!u||u.bind)return false;
+        const candidateCls=u.priorityCls??3;
+        if(candidateCls<0)return candidateCls<pinnedPriority.cls;
+        return candidateCls===0&&(pinnedPriority.cls>0||((u.priorityRank||0)<(pinnedPriority.rank||0)));
+      });
       if(slotIdx>=0){
         const u=remaining[item].splice(slotIdx,1)[0];
         for(const frozenKey of Object.keys(frozenPins)){
@@ -2948,7 +2987,7 @@ function calcBoxes(g,p){
     }
     if(isFrozen&&pin&&!pin.empty&&!pin.bind&&!team[pin.nick]){
       const pinnedOrder=pin.oid?orderById.get(pin.oid):null;
-      const pinnedPriority=pinnedOrder?boxOrderPriority(g,item,{...pinnedOrder,oid:pinnedOrder.id},team).cls:3;
+      const pinnedPriority=pinnedOrder?boxOrderPriority(g,item,{...pinnedOrder,oid:pinnedOrder.id},team,admins).cls:3;
       const memberIdx=remaining[item].findIndex(u=>u&&!u.bind&&team[u.nick]&&(u.priorityCls??3)<pinnedPriority);
       if(memberIdx>=0){
         const u=remaining[item].splice(memberIdx,1)[0];
@@ -3449,9 +3488,9 @@ function renderGroupSettingsTab(g){
     <div class="form-group" style="margin:10px 0"><label>官方預計出貨時間</label><input id="gsOfficialShip" value="${esc(g.officialShip||'')}" placeholder="例：2026/10 預定"></div>
     <div class="form-group" style="margin:10px 0"><label>官網 / 官店網址</label><input id="gsOfficialUrl" value="${esc(g.officialUrl||'')}" placeholder="例：https://example.com"></div>
     <div class="form-group" style="margin:10px 0"><label>特殊團（★｜固位 pass 監控）</label>
-      <label style="display:inline-flex;align-items:center;gap:4px;font-size:13px;cursor:pointer;white-space:nowrap">
-        <input type="checkbox" id="gsStar" ${g.starGroup?'checked':''}>★ 標記為特殊團
-        <span class="muted" style="font-size:11px">固團成員沒喊自己固位角色的商品即算一次 pass</span></label></div>
+      <label style="display:grid;grid-template-columns:16px minmax(0,1fr);align-items:start;gap:2px 7px;font-size:13px;cursor:pointer">
+        <input type="checkbox" id="gsStar" ${g.starGroup?'checked':''} style="margin-top:2px"><span>★ 標記為特殊團</span>
+        <span class="muted" style="font-size:11px;grid-column:2;white-space:normal">固團成員沒喊自己固位角色的商品即算一次 pass</span></label></div>
     <div class="form-group" style="margin:10px 0"><label>包含的團體</label>
       <div style="display:flex;flex-wrap:wrap;gap:6px 14px">
       ${getUnits().length?getUnits().map(u=>`<label style="display:inline-flex;align-items:center;gap:4px;font-size:12px;cursor:pointer;white-space:nowrap">
@@ -3498,13 +3537,53 @@ function saveGroupSettings(id){
   render();
 }
 
+function showSummaryExportModal(gid){
+  const g=getG(gid);if(!g)return;
+  const paymentOptions=g.type==='box'?`<div style="border-top:1px solid var(--line);padding-top:14px;margin-top:14px">
+      <strong>收款用總表（一人一列）</strong>
+      <div class="btn-row" style="margin-top:10px;flex-wrap:wrap;gap:6px">
+        <button class="bp" onclick="closeModal();exportSummaryXls(${gid})">全部</button>
+        <button onclick="closeModal();exportSummaryXls(${gid},'member')">團員</button>
+        <button onclick="closeModal();exportSummaryXls(${gid},'nonmember')">非團員</button>
+      </div>
+    </div>`:'';
+  openModal(`<h3>匯出總表</h3>
+    <div>
+      <strong>逐項明細</strong>
+      <div class="btn-row" style="margin-top:10px"><button class="bp" onclick="closeModal();exportXls(${gid})">匯出</button></div>
+    </div>
+    ${paymentOptions}
+    <div class="btn-row" style="margin-top:18px"><button onclick="closeModal()">取消</button></div>`);
+}
+
+function showPaymentImageExportModal(gid,scope='all'){
+  const g=getG(gid);if(!g||g.type!=='box')return;
+  const data=buildPaymentImageData(g,scope);
+  const nicks=data.sections.flatMap(section=>section.rows.map(row=>row.nick));
+  const scopeButton=(value,label)=>`<button class="${scope===value?'bp':''}" onclick="showPaymentImageExportModal(${gid},'${value}')">${label}</button>`;
+  const choices=nicks.map(nick=>`<label style="display:flex;align-items:center;gap:8px;padding:7px 9px;border-bottom:1px solid var(--line);cursor:pointer;min-width:0"><input class="paymentImageNick" type="checkbox" value="${esc(nick)}" checked style="width:16px;height:16px;min-width:16px;padding:0;margin:0;flex:0 0 16px"><span title="${esc(nick)}" style="min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(nick)}</span></label>`).join('');
+  openModal(`<h3>匯出收款圖</h3>
+    <div class="btn-row" style="flex-wrap:wrap;gap:6px">
+      ${scopeButton('all','總表')}${scopeButton('member','團員')}${scopeButton('nonmember','非團員')}
+    </div>
+    <div class="btn-row" style="margin-top:14px;gap:6px"><button onclick="document.querySelectorAll('.paymentImageNick').forEach(x=>x.checked=true)">全選</button><button onclick="document.querySelectorAll('.paymentImageNick').forEach(x=>x.checked=false)">清除</button></div>
+    <div style="margin-top:8px;border:1px solid var(--line);border-radius:8px;max-height:42vh;overflow-y:auto">${choices||'<div style="padding:12px">目前沒有資料</div>'}</div>
+    <div class="btn-row" style="margin-top:18px"><button class="bp" onclick="exportSelectedPaymentImage(${gid},'${scope}')">匯出</button><button onclick="closeModal()">取消</button></div>`);
+}
+
+function exportSelectedPaymentImage(gid,scope){
+  const nicks=[...document.querySelectorAll('.paymentImageNick:checked')].map(input=>input.value);
+  if(!nicks.length){alert('請至少選擇一個名字');return;}
+  closeModal();exportPaymentImage(gid,scope,nicks);
+}
+
 function renderExportTab(g){
   return `<div class="card"><h3>匯出</h3><div class="btn-row" style="margin-bottom:10px;flex-wrap:wrap;gap:6px">
     <button onclick="doExport(${g.id},'text')">純文字</button>
     <button onclick="doExport(${g.id},'csv')">CSV 下載</button>
     <button onclick="doExport(${g.id},'copy')">複製到剪貼簿</button>
-    <button class="bp" onclick="exportXls(${g.id})">匯出 Excel</button>
-    ${g.type==='box'?`<button class="bp" onclick="exportSummaryXls(${g.id})">匯出總表</button><button onclick="exportSummaryXls(${g.id},'member')">匯出團員總表</button><button onclick="exportSummaryXls(${g.id},'nonmember')">匯出非團員總表</button><button class="bp" onclick="exportProcurementXls(${g.id})">匯出採購表格</button>`:''}</div><div id="exportBox"></div></div>`;
+    <button class="bp" onclick="showSummaryExportModal(${g.id})">匯出總表</button>
+    ${g.type==='box'?`<button class="bp" onclick="showPaymentImageExportModal(${g.id})">匯出收款圖</button><button class="bp" onclick="exportProcurementXls(${g.id})">匯出採購表格</button><button class="bp" onclick="exportSecondPaymentXls(${g.id})">匯出二補清單</button>`:''}</div><div id="exportBox"></div></div>`;
 }
 
 function xlsxXmlEsc(v){return String(v??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&apos;');}
@@ -3606,6 +3685,47 @@ function exportProcurementXls(gid){
   downloadXlsxTable(html,g.name+'_採購表格','採購表格');
 }
 
+function buildSecondPaymentRows(g){
+  const byNick={};
+  for(const o of getConfirmedOrders(g)){
+    if(!byNick[o.nick])byNick[o.nick]={computed:0,surcharge:0};
+    const row=byNick[o.nick];
+    row.computed+=Math.max(0,parseInt(o.qty)||0)*effPrice(g,o);
+    const product=(g.boxProducts||[]).find(p=>orderMatches(p,o)&&p.contents.includes(o.item));
+    row.surcharge+=Math.max(0,Number(product?.surcharge)||0)*Math.max(0,parseInt(o.qty)||0);
+  }
+  const pay=g.pay||{},team=getTeam();
+  return Object.entries(byNick).map(([nick,row])=>{
+    const due=payTotal(g,nick,row.computed),paid=Math.max(0,Number(pay[nick]?.paid)||0);
+    const overpaid=Math.max(0,paid-due),total=row.surcharge-overpaid;
+    return{nick,isMember:!!team[nick],surcharge:row.surcharge,overpaid,total};
+  }).filter(row=>row.surcharge>0||row.overpaid>0)
+    .sort((a,b)=>(b.isMember?1:0)-(a.isMember?1:0)||b.total-a.total||a.nick.localeCompare(b.nick,'zh-Hant'));
+}
+function exportSecondPaymentXls(gid){
+  if(RO)return;
+  const g=getG(gid);if(!g||g.type!=='box')return;
+  const rows=buildSecondPaymentRows(g);
+  if(!rows.length){alert('目前沒有二補或溢收資料');return;}
+  const sections=[
+    {label:'團員',rows:rows.filter(row=>row.isMember)},
+    {label:'非團員',rows:rows.filter(row=>!row.isMember)}
+  ];
+  const sum=(list,key)=>list.reduce((total,row)=>total+row[key],0);
+  const resultText=value=>value<0?'退款 '+Math.abs(value).toLocaleString():value.toLocaleString();
+  let html=`<table cellspacing="0">
+    <tr><td colspan="4" style="font-size:14pt;font-weight:bold;border:none">${esc(g.name)} — 二補清單</td></tr>
+    <tr><th>暱稱</th><th>二補總額</th><th>溢收款項</th><th>二補－溢收後應收</th></tr>`;
+  for(const section of sections){
+    if(!section.rows.length)continue;
+    html+=`<tr><td colspan="4" style="background:#fff2b8;font-weight:bold">${section.label}</td></tr>`;
+    for(const row of section.rows)html+=`<tr><td style="font-weight:bold">${esc(row.nick)}</td><td class="num">${row.surcharge.toLocaleString()}</td><td class="num">${row.overpaid.toLocaleString()}</td><td class="num" style="font-weight:bold;${row.total<0?'color:#cc0000':''}">${resultText(row.total)}</td></tr>`;
+    html+=`<tr><td style="font-weight:bold">${section.label}小計</td><td class="num" style="font-weight:bold">${sum(section.rows,'surcharge').toLocaleString()}</td><td class="num" style="font-weight:bold">${sum(section.rows,'overpaid').toLocaleString()}</td><td class="num" style="font-weight:bold">${resultText(sum(section.rows,'total'))}</td></tr>`;
+  }
+  html+=`<tr><td style="font-weight:bold">整團總計</td><td class="num" style="font-weight:bold">${sum(rows,'surcharge').toLocaleString()}</td><td class="num" style="font-weight:bold">${sum(rows,'overpaid').toLocaleString()}</td><td class="num" style="font-weight:bold;${sum(rows,'total')<0?'color:#cc0000':''}">${resultText(sum(rows,'total'))}</td></tr></table>`;
+  downloadXlsxTable(html,g.name+'_二補清單','二補清單');
+}
+
 function exportSummaryXls(gid,scope='all'){
   const g=getG(gid);if(!g)return;
   const bps=g.boxProducts||[];
@@ -3680,6 +3800,117 @@ function exportSummaryXls(gid,scope='all'){
     <td></td><td></td></tr>`;
   html+='</table>';
   downloadXlsxTable(html,g.name+'_'+title,title);
+}
+
+function buildPaymentImageData(g,scope='all',selectedNicks=null){
+  const bps=g.boxProducts||[],byNick={};
+  for(const o of getConfirmedOrders(g)){
+    if(!byNick[o.nick])byNick[o.nick]={perBp:{},total:0};
+    const b=byNick[o.nick],bp=bps.find(p=>orderMatches(p,o)&&p.contents.includes(o.item));
+    const bpKey=bp?bp.id:'_none';
+    if(!b.perBp[bpKey])b.perBp[bpKey]={};
+    b.perBp[bpKey][o.item]=(b.perBp[bpKey][o.item]||0)+o.qty;
+    b.total+=o.qty*effPrice(g,o);
+  }
+  const team=getTeam();
+  const sorted=Object.keys(byNick).sort((a,b)=>byNick[b].total-byNick[a].total||a.localeCompare(b,'zh-Hant'));
+  const members=sorted.filter(n=>Object.prototype.hasOwnProperty.call(team,n));
+  const nonmembers=sorted.filter(n=>!Object.prototype.hasOwnProperty.call(team,n));
+  const selected=Array.isArray(selectedNicks)?new Set(selectedNicks):null;
+  const makeRows=nicks=>nicks.filter(nick=>!selected||selected.has(nick)).map(nick=>({
+    nick,
+    products:bps.map(p=>Object.entries(byNick[nick].perBp[p.id]||{}).map(([item,qty])=>{
+      const single=p.contents.length===1&&p.contents[0]===p.name;
+      return `${single?'':item}${qty}`;
+    }).join('、')),
+    total:payTotal(g,nick,byNick[nick].total)
+  }));
+  const sections=scope==='member'?[{label:'',rows:makeRows(members)}]
+    :scope==='nonmember'?[{label:'',rows:makeRows(nonmembers)}]
+    :[{label:'團員',rows:makeRows(members)},{label:'非團員',rows:makeRows(nonmembers)}];
+  const visibleSections=sections.filter(s=>s.rows.length);
+  const visibleIndexes=bps.map((_,index)=>index).filter(index=>visibleSections.some(section=>section.rows.some(row=>row.products[index])));
+  const visibleBps=visibleIndexes.map(index=>bps[index]);
+  for(const section of visibleSections)for(const row of section.rows)row.products=visibleIndexes.map(index=>row.products[index]);
+  return {bps:visibleBps,sections:visibleSections,title:scope==='member'?'團員':scope==='nonmember'?'非團員':'總表'};
+}
+
+function paymentImageTextLines(ctx,text,maxWidth){
+  const value=String(text??'');if(!value)return [''];
+  const lines=[];let line='';
+  for(const char of value){
+    if(line&&ctx.measureText(line+char).width>maxWidth){lines.push(line);line=char;}
+    else line+=char;
+  }
+  if(line)lines.push(line);
+  return lines;
+}
+
+async function exportPaymentImage(gid,scope='all',selectedNicks=null){
+  const g=getG(gid);if(!g||g.type!=='box')return;
+  const data=buildPaymentImageData(g,scope,selectedNicks);
+  if(!data.bps.length){alert('尚無商品');return;}
+  if(!data.sections.length){alert('目前沒有可匯出的資料');return;}
+  if(document.fonts&&document.fonts.ready)await document.fonts.ready;
+
+  const canvas=document.createElement('canvas'),ctx=canvas.getContext('2d');
+  const font='15px "Microsoft JhengHei","PingFang TC",sans-serif';
+  ctx.font=font;
+  const headers=['暱稱',...data.bps.map(p=>p.name),'總金額'];
+  const allRows=data.sections.flatMap(s=>s.rows);
+  const rawColumns=headers.map((header,i)=>[header,...allRows.map(row=>i===0?row.nick:i===headers.length-1?'$'+row.total.toLocaleString():row.products[i-1])]);
+  const widths=rawColumns.map((values,i)=>{
+    const measured=Math.max(...values.map(v=>ctx.measureText(String(v||'')).width))+28;
+    const min=i===0?110:i===headers.length-1?110:100;
+    const max=i===0?190:i===headers.length-1?130:190;
+    return Math.max(min,Math.min(max,measured));
+  });
+  const margin=28,titleHeight=66,headerHeight=46,lineHeight=22,padY=10;
+  const preparedSections=data.sections.map(section=>({label:section.label,rows:section.rows.map(row=>{
+    const values=[row.nick,...row.products,'$'+row.total.toLocaleString()];
+    const lines=values.map((value,i)=>paymentImageTextLines(ctx,value,widths[i]-20));
+    return {lines,height:Math.max(44,Math.max(...lines.map(x=>x.length))*lineHeight+padY*2)};
+  })}));
+  const tableWidth=widths.reduce((sum,w)=>sum+w,0);
+  const logicalWidth=tableWidth+margin*2;
+  const logicalHeight=margin+titleHeight+headerHeight+preparedSections.reduce((sum,s)=>sum+(s.label?38:0)+s.rows.reduce((n,r)=>n+r.height,0),0)+margin;
+  const ratio=Math.max(.5,Math.min(2,16000/logicalWidth,16000/logicalHeight,Math.sqrt(30000000/(logicalWidth*logicalHeight))));
+  canvas.width=Math.ceil(logicalWidth*ratio);canvas.height=Math.ceil(logicalHeight*ratio);ctx.scale(ratio,ratio);
+
+  const colors={bg:'#fffafb',title:'#684f59',head:'#d8a7b7',headText:'#fffdfd',section:'#f2dfe6',row:'#fffdfd',alt:'#fcf4f7',grid:'#ead5dd',text:'#5d4850'};
+  ctx.fillStyle=colors.bg;ctx.fillRect(0,0,logicalWidth,logicalHeight);
+  ctx.fillStyle=colors.title;ctx.font='bold 24px "Microsoft JhengHei","PingFang TC",sans-serif';ctx.textAlign='left';ctx.textBaseline='middle';
+  ctx.fillText(`${g.name} — 收款${data.title}`,margin,margin+25);
+  let y=margin+titleHeight,x=margin;
+  ctx.font='bold 15px "Microsoft JhengHei","PingFang TC",sans-serif';
+  for(let i=0;i<headers.length;i++){
+    ctx.fillStyle=colors.head;ctx.fillRect(x,y,widths[i],headerHeight);
+    ctx.strokeStyle=colors.grid;ctx.strokeRect(x,y,widths[i],headerHeight);
+    ctx.fillStyle=colors.headText;ctx.textAlign='center';ctx.fillText(headers[i],x+widths[i]/2,y+headerHeight/2);x+=widths[i];
+  }
+  y+=headerHeight;let rowIndex=0;
+  for(const section of preparedSections){
+    if(section.label){
+      ctx.fillStyle=colors.section;ctx.fillRect(margin,y,tableWidth,38);ctx.strokeStyle=colors.grid;ctx.strokeRect(margin,y,tableWidth,38);
+      ctx.fillStyle=colors.title;ctx.textAlign='left';ctx.font='bold 15px "Microsoft JhengHei","PingFang TC",sans-serif';ctx.fillText(section.label,margin+12,y+19);y+=38;
+    }
+    for(const row of section.rows){
+      x=margin;ctx.font=font;
+      for(let i=0;i<row.lines.length;i++){
+        ctx.fillStyle=rowIndex%2?colors.alt:colors.row;ctx.fillRect(x,y,widths[i],row.height);
+        ctx.strokeStyle=colors.grid;ctx.strokeRect(x,y,widths[i],row.height);
+        ctx.fillStyle=colors.text;ctx.textAlign=i===headers.length-1?'right':i===0?'left':'center';
+        const tx=i===headers.length-1?x+widths[i]-10:i===0?x+10:x+widths[i]/2;
+        const blockHeight=row.lines[i].length*lineHeight,startY=y+(row.height-blockHeight)/2+lineHeight/2;
+        row.lines[i].forEach((line,k)=>ctx.fillText(line,tx,startY+k*lineHeight));x+=widths[i];
+      }
+      y+=row.height;rowIndex++;
+    }
+  }
+  const fileName=String(`${g.name}_收款${data.title}`).replace(/[\\/:*?"<>|]/g,'_')+'.png';
+  const save=blob=>{const url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=fileName;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);};
+  if(canvas.toBlob)canvas.toBlob(blob=>blob?save(blob):alert('圖片匯出失敗'),'image/png');
+  else{const a=document.createElement('a');a.href=canvas.toDataURL('image/png');a.download=fileName;a.click();}
 }
 
 
