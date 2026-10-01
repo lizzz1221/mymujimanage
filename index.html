@@ -616,7 +616,7 @@ function renderHome(){
     </div>
     <button class="gear-btn" onclick="showSettings()" title="設定">⚙</button></div>
     ${RO&&window.VIEWER_DB.publishedAt?`<div class="muted" style="margin-bottom:1rem">資料更新時間：${esc(window.VIEWER_DB.publishedAt)}</div>`:''}
-    <div class="toolbar"><button class="bp" onclick="showNewGroupModal()">建立新團</button><button onclick="showFixedTeamModal()">固團成員</button><button onclick="showUnitsModal()">團體管理</button><button onclick="showShipModal()">個人貨況查詢</button><button onclick="showGithubSyncModal()">GitHub 同步</button><button onclick="document.getElementById('importDataFile').click()">匯入 data.js</button><input id="importDataFile" type="file" accept=".js,.txt" style="display:none" onchange="importViewerData(this)"><button onclick="exportViewerData()">發布查詢資料</button><span class="muted">共 ${db.groups.length} 個團</span></div>
+    <div class="toolbar"><button class="bp" onclick="showNewGroupModal()">建立新團</button><button onclick="showFixedTeamModal()">固團成員</button>${RO?'':'<button onclick="showMemberPaymentOverview()">團員收款總覽</button>'}<button onclick="showUnitsModal()">團體管理</button><button onclick="showShipModal()">個人貨況查詢</button><button onclick="showGithubSyncModal()">GitHub 同步</button><button onclick="document.getElementById('importDataFile').click()">匯入 data.js</button><input id="importDataFile" type="file" accept=".js,.txt" style="display:none" onchange="importViewerData(this)"><button onclick="exportViewerData()">發布查詢資料</button><span class="muted">共 ${db.groups.length} 個團</span></div>
     <div class="toolbar" style="margin-top:-4px">
       <button class="bs" onclick="exportFullBackup()" title="匯出團購管理資料；各團本機網址、平台 ID、喊單截圖與收款個人備註不包含在內">📦 匯出完整備份</button>
       <button class="bs" onclick="document.getElementById('importBackupFile').click()" title="匯入團購管理資料；不影響各團本機網址、平台 ID、喊單截圖與收款個人備註">📥 匯入完整備份</button>
@@ -649,6 +649,7 @@ function groupCard(g,dim){
   const buyers=new Set(g.orders.map(o=>o.nick)).size;
   let productCount=0;
   if(g.type==='box')productCount=(g.boxProducts||[]).length;
+  else if(g.type==='basic'&&(g.boxProducts||[]).length)productCount=(g.boxProducts||[]).filter(p=>p.kind==='single').length;
   else if(g.type==='carry')productCount=(g.items||[]).length;
   if(!productCount)productCount=new Set(g.orders.map(o=>o.item).filter(Boolean)).size;
   const openDate=g.createdAt||'';
@@ -675,7 +676,7 @@ function renderGroup(){
   const T=getTypes(),SBM=getSB(),st=S();
   const ti=T[g.type]||T.basic;
   const officialBtn=g.officialUrl?`<button class="bs" onclick="event.stopPropagation();openOfficialUrl('${encodeURIComponent(g.officialUrl)}')">官網/官店</button>`:'';
-  let h=`<div class="nav"><span class="nav-crumb" onclick="goHome()">← 回首頁</span><div style="flex:1"></div><button class="bs" onclick="showEditGroupModal(${g.id})">編輯團</button></div>
+  let h=`<div class="nav"><span class="nav-crumb" onclick="goHome()">← 回首頁</span><div style="flex:1"></div>${RO?'':`<button class="bs" onclick="showEditGroupModal(${g.id})">編輯團</button>`}</div>
     <div class="group-hero">
       ${g.cover?`<img class="group-hero-cover" src="${g.cover}" style="object-position:${coverPos(g)}">`:`<div class="group-hero-ph"></div>`}
       <div class="group-hero-main">
@@ -689,7 +690,7 @@ function renderGroup(){
   const tabDefs=[
     {key:'orders',label:'喊單列表',show:true},
     {key:'boxSetup',label:'拆團狀況',show:g.type==='box'},
-    {key:'single',label:'單領',show:g.type==='box'},
+    {key:'single',label:g.type==='basic'?(RO?'商品':'商品管理'):'單領',show:g.type==='box'||g.type==='basic'},
     {key:'items',label:'商品庫存',show:g.type==='carry'},
     {key:'priority',label:'帶多計算',show:g.type==='carry'},
     {key:'buyers',label:'已成團統計',show:true},
@@ -731,6 +732,8 @@ function renderOrdersTab(g){
   const items=[...new Set(g.orders.map(o=>o.item))].sort();
   const listOrders=collapseOrderListRows(g.orders);
   const isBox=g.type==='box';
+  const bps=(g.boxProducts||[]).filter(p=>g.type!=='basic'||p.kind==='single');
+  const hasCatalog=(isBox||g.type==='basic')&&bps.length>0;
   const confirmed=getConfirmedOrders(g);
   const buyers=new Set(confirmed.map(o=>o.nick)).size;
   const totalQty=confirmed.reduce((s,o)=>s+o.qty,0);
@@ -752,8 +755,7 @@ function renderOrdersTab(g){
   h+=`<div class="card"><div class="card-header"><h3 style="margin:0">喊單列表 (${listOrders.length})</h3>
     <button class="bs bd" onclick="clearOrders(${g.id})">清除全部</button></div>`;
   let itemFilterHtml;
-  const bps=g.boxProducts||[];
-  if(isBox&&bps.length){
+  if(hasCatalog){
     itemFilterHtml=`<select onchange="sItem=this.value;render()"><option value="">全部${esc(st.fieldItem)}</option>`+
       bps.map(p=>`<optgroup label="${esc(p.name)}">
         <option value="bp:${p.id}" ${sItem==='bp:'+p.id?'selected':''}>${esc(p.name)}（全部）</option>
@@ -786,17 +788,17 @@ function renderOrdersTab(g){
   if(!filtered.length){h+=`<div class="empty">無喊單</div>`;}
   else{
     h+=`<div style="overflow-x:auto"><table><thead><tr>
-      <th>${esc(st.fieldNick)}</th><th>${esc(st.fieldItem)}</th>${isBox?'<th>所屬盒組</th>':''}<th>${esc(st.fieldQty)}</th><th>${esc(st.fieldPrice)}</th><th>小計</th><th>${esc(st.fieldNote)}</th><th>時間</th>${RO?'':'<th>操作</th>'}
+      <th>${esc(st.fieldNick)}</th><th>${esc(st.fieldItem)}</th>${hasCatalog?`<th>${isBox?'所屬盒組':'所屬商品'}</th>`:''}<th>${esc(st.fieldQty)}</th><th>${esc(st.fieldPrice)}</th><th>小計</th><th>${esc(st.fieldNote)}</th><th>時間</th>${RO?'':'<th>操作</th>'}
     </tr></thead><tbody>`;
     for(const o of filtered){
       let boxName='';
-      if(isBox){const bp=(g.boxProducts||[]).find(p=>orderMatches(p,o)&&p.contents.includes(o.item));boxName=bp?bp.name:'';}
+      if(hasCatalog){const bp=bps.find(p=>orderMatches(p,o)&&p.contents.includes(o.item));boxName=bp?bp.name:'';}
       const pr=effPrice(g,o);
       const isTeam=!!_team[o.nick];
       const liftCount=Math.max(0,parseInt(o.liftCount)||0),liftTargetCount=Array.isArray(o.liftTargets)?o.liftTargets.length:0;
       const fxBadge=(!isTeam&&o.fixed==='slot'?` <span class="badge b-purple">固${o.fixedRank||''}</span>`:!isTeam&&o.fixed==='pick'?' <span class="badge b-teal">撿</span>':'')+(o.manualLift?' <span class="badge b-amber">提</span>':o.lift?` <span class="badge b-amber">提${liftTargetCount?' · 指定'+liftTargetCount:''}${liftCount?' · 帶'+liftCount:''}</span>`:'');
       h+=`<tr><td>${isTeam?`<span style="color:#a32d2d;font-weight:bold">${esc(o.nick)}</span>`:esc(o.nick)}${fxBadge}</td><td>${esc(o.item)}</td>
-        ${isBox?`<td>${boxName?`<span class="badge b-coral">${esc(boxName)}</span>`:`<span class="muted">未對應</span>`}</td>`:''}
+        ${hasCatalog?`<td>${boxName?`<span class="badge b-coral">${esc(boxName)}</span>`:`<span class="muted">未對應</span>`}</td>`:''}
         <td>${o.all?'<span class="badge b-green">已 all</span>':o.qty}</td><td>${pr?'$'+pr:'-'}</td><td>${o.all?'<span class="muted">依成團數</span>':pr?'$'+(o.qty*pr):'-'}</td>
         <td class="muted">${esc(o.note||'')}</td>
         <td class="muted" style="white-space:nowrap">${fmtTs(o.ts)}</td>
@@ -817,11 +819,12 @@ function memberGroupAllShipped(list,ship,nick){
     return !!(ship[key]&&ship[key].s);
   });
 }
+function isShipQueryGroup(g){return ['已完成收款','已到貨','已結團'].includes(g.status);}
 function showShipModal(){
   const db=loadDB();
   const team=getTeam();
   const nicks=Object.keys(team).sort();
-  const visibleGroups=db.groups.filter(g=>['已截團待收款','收款中','已完成收款','已到貨','已結團'].includes(g.status));
+  const visibleGroups=db.groups.filter(isShipQueryGroup);
   if(_spNick&&!team[_spNick])_spNick='';
   if(_spGid&&!visibleGroups.some(g=>g.id===parseInt(_spGid)))_spGid='';
   let rowsHtml='';
@@ -909,11 +912,11 @@ function toggleShipKey(gid,keyEnc,field){
 
 function buildViewerDataJs(){
   const db=loadDB();
-  const groups=JSON.parse(JSON.stringify(db.groups.filter(g=>g.type==='box')));
+  const groups=JSON.parse(JSON.stringify(db.groups.filter(g=>g.type==='box'||g.type==='basic')));
   for(const g of groups){
     for(const nick of Object.keys(g.pay||{}))delete g.pay[nick].pnote;
   }
-  if(!groups.length)throw new Error('沒有可發布的拆盒團資料');
+  if(!groups.length)throw new Error('沒有可發布的拆團或一般代購資料');
   const pub={
     groups,
     nid:db.nid,
@@ -1804,30 +1807,32 @@ function renderBoxSetupTab(g){
 function renderSingleTab(g){
   if(!g.boxProducts) g.boxProducts=[];
   const singles=g.boxProducts.filter(p=>p.kind==='single');
-  let h=`<div class="card"><div class="card-header"><h3 style="margin:0">單領商品</h3>
-    <button class="bs bp" onclick="showAddBoxProductModal(${g.id},'single')">新增單領商品</button></div>`;
+  const isBasic=g.type==='basic';
+  let h=`<div class="card"><div class="card-header"><h3 style="margin:0">${isBasic?(RO?'商品':'商品管理'):'單領商品'}</h3>
+    ${RO?'':`<button class="bs bp" onclick="showAddBoxProductModal(${g.id},'single')">${isBasic?'新增商品':'新增單領商品'}</button>`}</div>`;
   if(!singles.length){
-    h+=`<div class="empty">尚未設定單領商品</div>`;
+    h+=`<div class="empty">${isBasic?'尚未設定商品':'尚未設定單領商品'}</div>`;
   } else {
     for(const p of singles){
       const orderedContents=p.contents.filter(c=>g.orders.some(o=>o.item===c&&orderMatches(p,o)));
+      const shownContents=isBasic?p.contents:orderedContents;
       const totalQty=g.orders.filter(o=>p.contents.includes(o.item)&&orderMatches(p,o)).reduce((s,o)=>s+o.qty,0);
       h+=`<div class="box-product">
         <div class="box-product-header">
           <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">${p.img?`<img src="${p.img}" style="width:28px;height:28px;object-fit:cover;border-radius:4px;cursor:zoom-in" onclick="showImg(this.src)">`:''}<strong>${esc(p.name)}</strong>
-            <span class="muted" style="margin-left:6px">${orderedContents.length} 款${p.unitPrice?' · $'+p.unitPrice+'/個':''} · 已喊 ${totalQty} 個</span></div>
-          <div style="display:flex;gap:4px">
+            <span class="muted" style="margin-left:6px">${shownContents.length} 款${p.unitPrice?' · $'+p.unitPrice+'/個':''} · 已喊 ${totalQty} 個</span></div>
+          ${RO?'':`<div style="display:flex;gap:4px">
             <button class="bs bg" onclick="showEditBoxProductModal(${g.id},${p.id})">編輯</button>
-            <button class="bs bg" style="color:#a32d2d" onclick="delBoxProduct(${g.id},${p.id})">刪除</button></div>
+            <button class="bs bg" style="color:#a32d2d" onclick="delBoxProduct(${g.id},${p.id})">刪除</button></div>`}
         </div>
         <div style="overflow-x:auto"><table><thead><tr><th>款式</th><th>單價</th><th>已喊</th><th>喊單者</th></tr></thead><tbody>`;
-      for(const c of orderedContents){
+      for(const c of shownContents){
         const buyers=g.orders.filter(o=>o.item===c&&orderMatches(p,o));
         const qty=buyers.reduce((s,o)=>s+o.qty,0);
         h+=`<tr><td>${esc(c)}</td><td>${p.unitPrice?'$'+p.unitPrice:'-'}</td><td>${qty}</td>
           <td class="muted">${buyers.map(b=>`${esc(b.nick)}×${b.qty}`).join(', ')}</td></tr>`;
       }
-      if(!orderedContents.length)h+=`<tr><td colspan="4" class="muted" style="text-align:center">尚無喊單</td></tr>`;
+      if(!shownContents.length)h+=`<tr><td colspan="4" class="muted" style="text-align:center">尚無喊單</td></tr>`;
       h+=`</tbody></table></div></div>`;
     }
   }
@@ -3389,6 +3394,61 @@ function payTotal(g,nick,computed){
   const p=(g.pay||{})[nick];
   return p&&p.totalOv!=null?p.totalOv:computed;
 }
+function paymentStatusHtml(paid,diff){
+  if(!paid)return '<span class="badge b-red">未收款</span>';
+  if(diff>0)return `<span class="badge b-amber">餘款 $${diff.toLocaleString()}</span>`;
+  if(diff<0)return `<span class="badge b-purple">溢收 $${(-diff).toLocaleString()}</span>`;
+  return '<span class="badge b-green">已付清</span>';
+}
+function buildMemberPaymentOverview(nick){
+  const rows=[];
+  for(const g of loadDB().groups||[]){
+    if(g.status==='已流團')continue;
+    const orders=getConfirmedOrders(g).filter(o=>o.nick===nick);
+    if(!orders.length)continue;
+    const computed=orders.reduce((sum,o)=>sum+o.qty*effPrice(g,o),0);
+    const rec=(g.pay||{})[nick]||{};
+    const total=payTotal(g,nick,computed),paid=Number(rec.paid)||0,diff=total-paid;
+    rows.push({gid:g.id,name:g.name,status:g.status,createdAt:g.createdAt||'',computed,total,paid,diff,isOverride:rec.totalOv!=null});
+  }
+  rows.sort((a,b)=>(b.diff>0?1:0)-(a.diff>0?1:0)||b.createdAt.localeCompare(a.createdAt)||b.gid-a.gid);
+  return {
+    rows,
+    total:rows.reduce((sum,row)=>sum+row.total,0),
+    paid:rows.reduce((sum,row)=>sum+row.paid,0),
+    due:rows.reduce((sum,row)=>sum+Math.max(0,row.diff),0)
+  };
+}
+let _memberPaymentOnlyDue=false;
+function showMemberPaymentOverview(nickEnc='',onlyDue=null){
+  if(RO)return;
+  if(arguments.length===0)_memberPaymentOnlyDue=false;
+  else if(typeof onlyDue==='boolean')_memberPaymentOnlyDue=onlyDue;
+  const members=Object.keys(getTeam()).sort((a,b)=>a.localeCompare(b,'zh-Hant'));
+  if(!members.length){alert('目前沒有固團成員');return;}
+  let nick=nickEnc?decodeURIComponent(nickEnc):'';
+  if(!members.includes(nick))nick='';
+  const options=`<option value="">選擇團員</option>${members.map(name=>`<option value="${esc(name)}" ${name===nick?'selected':''}>${esc(name)}</option>`).join('')}`;
+  let detail='';
+  if(nick){
+    const data=buildMemberPaymentOverview(nick);
+    const visibleRows=_memberPaymentOnlyDue?data.rows.filter(row=>row.diff>0):data.rows;
+    if(!visibleRows.length)detail=`<div class="empty">${_memberPaymentOnlyDue?'目前沒有未收款資料':'目前沒有收款資料'}</div>`;
+    else detail=`<div class="stats" style="margin:14px 0 12px;grid-template-columns:minmax(0,1fr)">
+        <div class="stat"><div class="stat-l">未付款總額</div><div class="stat-v" style="color:${data.due?'#a32d2d':'#4f8a68'}">$${data.due.toLocaleString()}</div></div>
+      </div>
+      <div style="overflow-x:auto"><table><thead><tr><th>團名</th><th>應付總額</th><th>已收款項</th><th>狀態</th><th></th></tr></thead><tbody>
+        ${visibleRows.map(row=>`<tr><td><strong>${esc(row.name)}</strong></td><td>$${row.total.toLocaleString()}${row.isOverride?'<span style="color:#d16277;font-weight:bold">*</span>':''}</td><td>${row.paid?'$'+row.paid.toLocaleString():'-'}</td><td>${paymentStatusHtml(row.paid,row.diff)}</td><td><button class="bs bg" onclick="showPayModal(${row.gid},'${encodeURIComponent(nick)}','memberOverview')">編輯</button></td></tr>`).join('')}
+      </tbody></table></div>`;
+  }
+  openModal(`<h3>團員收款總覽</h3>
+    <div class="form-row" style="align-items:end">
+      <div class="form-group"><label>團員</label><select onchange="showMemberPaymentOverview(encodeURIComponent(this.value))">${options}</select></div>
+      <label style="display:flex;align-items:center;gap:7px;min-height:38px;cursor:pointer;white-space:nowrap"><input type="checkbox" style="width:auto" ${_memberPaymentOnlyDue?'checked':''} onchange="showMemberPaymentOverview('${encodeURIComponent(nick)}',this.checked)">只顯示未收到</label>
+    </div>
+    ${detail}
+    <div class="btn-row" style="margin-top:16px"><button onclick="closeModal()">關閉</button></div>`,'820px');
+}
 function renderPayTab(g){
   const totals={};
   for(const o of getConfirmedOrders(g)){totals[o.nick]=(totals[o.nick]||0)+o.qty*effPrice(g,o);}
@@ -3404,11 +3464,7 @@ function renderPayTab(g){
       const total=payTotal(g,nick,computed);
       const isOv=p.totalOv!=null;
       const diff=total-(p.paid||0);
-      let st;
-      if(!p.paid) st='<span class="badge b-amber">未收款</span>';
-      else if(diff>0) st=`<span class="badge b-red">餘款 $${diff.toLocaleString()}</span>`;
-      else if(diff<0) st=`<span class="badge b-purple">溢收 $${(-diff).toLocaleString()}</span>`;
-      else st='<span class="badge b-green">已付清</span>';
+      const st=paymentStatusHtml(p.paid,diff);
       h+=`<tr><td>${team[nick]?`<span style="color:#a32d2d;font-weight:bold">${esc(nick)}</span>`:esc(nick)}</td>
         <td>$${total.toLocaleString()}${isOv?'<span style="color:#d16277;font-weight:bold">*</span>':''}</td><td>${p.paid?'$'+p.paid.toLocaleString():'-'}</td><td>${st}</td>
         <td class="muted" style="max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(p.note||'')}</td>
@@ -3419,7 +3475,7 @@ function renderPayTab(g){
   }
   h+=`</div>`;return h;
 }
-function showPayModal(gid,nickEnc){
+function showPayModal(gid,nickEnc,returnView=''){
   const nick=decodeURIComponent(nickEnc);
   const g=getG(gid);if(!g)return;
   const computed=getConfirmedOrders(g).filter(o=>o.nick===nick).reduce((s,o)=>s+o.qty*effPrice(g,o),0);
@@ -3442,8 +3498,8 @@ function showPayModal(gid,nickEnc){
     <div class="btn-row">
       <button class="bs" onclick="document.getElementById('payAmt').value=document.getElementById('payTotal').value">填入全額</button>
       <button class="bs" onclick="document.getElementById('payTotal').value=${computed}">還原系統計算</button>
-      <button class="bp" onclick="savePay(${gid},'${encodeURIComponent(nick)}',${computed})">儲存</button>
-      <button onclick="closeModal()">取消</button></div>`);
+      <button class="bp" onclick="savePay(${gid},'${encodeURIComponent(nick)}',${computed},'${returnView}')">儲存</button>
+      <button onclick="${returnView==='memberOverview'?`showMemberPaymentOverview('${encodeURIComponent(nick)}')`:'closeModal()'}">取消</button></div>`);
   setTimeout(()=>$('#payAmt').focus(),100);
 }
 function fillPayPrivateNote(value){
@@ -3452,7 +3508,7 @@ function fillPayPrivateNote(value){
   input.value=value;
   input.focus();
 }
-function savePay(gid,nickEnc,computed){
+function savePay(gid,nickEnc,computed,returnView=''){
   const nick=decodeURIComponent(nickEnc);
   const paid=parseFloat($('#payAmt').value)||0;
   const note=$('#payNote').value.trim();
@@ -3466,6 +3522,7 @@ function savePay(gid,nickEnc,computed){
   });
   updateLocalPayNote(gid,nick,pnote);
   closeModal();render();
+  if(returnView==='memberOverview')showMemberPaymentOverview(encodeURIComponent(nick));
 }
 
 function renderGroupSettingsTab(g){
@@ -3539,14 +3596,14 @@ function saveGroupSettings(id){
 
 function showSummaryExportModal(gid){
   const g=getG(gid);if(!g)return;
-  const paymentOptions=g.type==='box'?`<div style="border-top:1px solid var(--line);padding-top:14px;margin-top:14px">
+  const paymentOptions=`<div style="border-top:1px solid var(--line);padding-top:14px;margin-top:14px">
       <strong>收款用總表（一人一列）</strong>
       <div class="btn-row" style="margin-top:10px;flex-wrap:wrap;gap:6px">
         <button class="bp" onclick="closeModal();exportSummaryXls(${gid})">全部</button>
         <button onclick="closeModal();exportSummaryXls(${gid},'member')">團員</button>
         <button onclick="closeModal();exportSummaryXls(${gid},'nonmember')">非團員</button>
       </div>
-    </div>`:'';
+    </div>`;
   openModal(`<h3>匯出總表</h3>
     <div>
       <strong>逐項明細</strong>
@@ -3557,14 +3614,14 @@ function showSummaryExportModal(gid){
 }
 
 function showPaymentImageExportModal(gid,scope='all'){
-  const g=getG(gid);if(!g||g.type!=='box')return;
+  const g=getG(gid);if(!g||!['box','basic'].includes(g.type))return;
   const data=buildPaymentImageData(g,scope);
-  const nicks=data.sections.flatMap(section=>section.rows.map(row=>row.nick));
+  const rows=data.sections.flatMap(section=>section.rows);
   const scopeButton=(value,label)=>`<button class="${scope===value?'bp':''}" onclick="showPaymentImageExportModal(${gid},'${value}')">${label}</button>`;
-  const choices=nicks.map(nick=>`<label style="display:flex;align-items:center;gap:8px;padding:7px 9px;border-bottom:1px solid var(--line);cursor:pointer;min-width:0"><input class="paymentImageNick" type="checkbox" value="${esc(nick)}" checked style="width:16px;height:16px;min-width:16px;padding:0;margin:0;flex:0 0 16px"><span title="${esc(nick)}" style="min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(nick)}</span></label>`).join('');
+  const choices=rows.map(row=>`<label style="display:flex;align-items:center;gap:8px;padding:7px 9px;border-bottom:1px solid var(--line);cursor:pointer;min-width:0"><input class="paymentImageNick" type="checkbox" value="${esc(row.nick)}" checked style="width:16px;height:16px;min-width:16px;padding:0;margin:0;flex:0 0 16px"><span title="${esc(row.nick)}" style="min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(row.nick)}</span>${scope==='unpaid'?`<strong style="margin-left:auto;white-space:nowrap;color:#a32d2d">未匯 $${row.total.toLocaleString()}</strong>`:''}</label>`).join('');
   openModal(`<h3>匯出收款圖</h3>
     <div class="btn-row" style="flex-wrap:wrap;gap:6px">
-      ${scopeButton('all','總表')}${scopeButton('member','團員')}${scopeButton('nonmember','非團員')}
+      ${scopeButton('all','總表')}${scopeButton('member','團員')}${scopeButton('nonmember','非團員')}${scopeButton('unpaid','未匯款名單')}
     </div>
     <div class="btn-row" style="margin-top:14px;gap:6px"><button onclick="document.querySelectorAll('.paymentImageNick').forEach(x=>x.checked=true)">全選</button><button onclick="document.querySelectorAll('.paymentImageNick').forEach(x=>x.checked=false)">清除</button></div>
     <div style="margin-top:8px;border:1px solid var(--line);border-radius:8px;max-height:42vh;overflow-y:auto">${choices||'<div style="padding:12px">目前沒有資料</div>'}</div>
@@ -3583,7 +3640,7 @@ function renderExportTab(g){
     <button onclick="doExport(${g.id},'csv')">CSV 下載</button>
     <button onclick="doExport(${g.id},'copy')">複製到剪貼簿</button>
     <button class="bp" onclick="showSummaryExportModal(${g.id})">匯出總表</button>
-    ${g.type==='box'?`<button class="bp" onclick="showPaymentImageExportModal(${g.id})">匯出收款圖</button><button class="bp" onclick="exportProcurementXls(${g.id})">匯出採購表格</button><button class="bp" onclick="exportSecondPaymentXls(${g.id})">匯出二補清單</button>`:''}</div><div id="exportBox"></div></div>`;
+    ${['box','basic'].includes(g.type)?`<button class="bp" onclick="showPaymentImageExportModal(${g.id})">匯出收款圖</button>`:''}${g.type==='box'?`<button class="bp" onclick="exportProcurementXls(${g.id})">匯出採購表格</button><button class="bp" onclick="exportSecondPaymentXls(${g.id})">匯出二補清單</button>`:''}</div><div id="exportBox"></div></div>`;
 }
 
 function xlsxXmlEsc(v){return String(v??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&apos;');}
@@ -3817,14 +3874,16 @@ function buildPaymentImageData(g,scope='all',selectedNicks=null){
   const members=sorted.filter(n=>Object.prototype.hasOwnProperty.call(team,n));
   const nonmembers=sorted.filter(n=>!Object.prototype.hasOwnProperty.call(team,n));
   const selected=Array.isArray(selectedNicks)?new Set(selectedNicks):null;
-  const makeRows=nicks=>nicks.filter(nick=>!selected||selected.has(nick)).map(nick=>({
-    nick,
+  const makeRows=nicks=>nicks.filter(nick=>!selected||selected.has(nick)).map(nick=>{
+    const due=payTotal(g,nick,byNick[nick].total);
+    const unpaid=Math.max(0,due-(Number((g.pay||{})[nick]?.paid)||0));
+    return {nick,
     products:bps.map(p=>Object.entries(byNick[nick].perBp[p.id]||{}).map(([item,qty])=>{
       const single=p.contents.length===1&&p.contents[0]===p.name;
       return `${single?'':item}${qty}`;
     }).join('、')),
-    total:payTotal(g,nick,byNick[nick].total)
-  }));
+    total:scope==='unpaid'?unpaid:due};
+  }).filter(row=>scope!=='unpaid'||row.total>0);
   const sections=scope==='member'?[{label:'',rows:makeRows(members)}]
     :scope==='nonmember'?[{label:'',rows:makeRows(nonmembers)}]
     :[{label:'團員',rows:makeRows(members)},{label:'非團員',rows:makeRows(nonmembers)}];
@@ -3832,7 +3891,7 @@ function buildPaymentImageData(g,scope='all',selectedNicks=null){
   const visibleIndexes=bps.map((_,index)=>index).filter(index=>visibleSections.some(section=>section.rows.some(row=>row.products[index])));
   const visibleBps=visibleIndexes.map(index=>bps[index]);
   for(const section of visibleSections)for(const row of section.rows)row.products=visibleIndexes.map(index=>row.products[index]);
-  return {bps:visibleBps,sections:visibleSections,title:scope==='member'?'團員':scope==='nonmember'?'非團員':'總表'};
+  return {bps:visibleBps,sections:visibleSections,title:scope==='member'?'團員':scope==='nonmember'?'非團員':scope==='unpaid'?'未匯款名單':'總表',amountLabel:scope==='unpaid'?'未匯金額':'總金額'};
 }
 
 function paymentImageTextLines(ctx,text,maxWidth){
@@ -3846,8 +3905,32 @@ function paymentImageTextLines(ctx,text,maxWidth){
   return lines;
 }
 
+let _paymentImagePreview=null;
+function clearPaymentImagePreview(){
+  if(_paymentImagePreview?.objectUrl)URL.revokeObjectURL(_paymentImagePreview.url);
+  _paymentImagePreview=null;
+}
+function showPaymentImagePreview(source,fileName,objectUrl=true,previewWidth=720){
+  clearPaymentImagePreview();
+  const url=objectUrl?URL.createObjectURL(source):source;
+  _paymentImagePreview={url,fileName,objectUrl};
+  openModal(`<h3>預覽收款圖</h3>
+    <div style="max-height:60vh;overflow:auto;border:1px solid var(--line);border-radius:8px;background:#fffafb;padding:6px">
+      <img src="${url}" alt="收款圖預覽" style="display:block;width:${Math.max(320,Math.round(previewWidth))}px;height:auto;max-width:none">
+    </div>
+    <div class="btn-row" style="margin-top:14px"><button class="bp" onclick="confirmPaymentImageDownload()">確認下載</button><button onclick="cancelPaymentImagePreview()">取消</button></div>`);
+}
+function confirmPaymentImageDownload(){
+  const preview=_paymentImagePreview;if(!preview)return;
+  const a=document.createElement('a');a.href=preview.url;a.download=preview.fileName;document.body.appendChild(a);a.click();a.remove();
+  _paymentImagePreview=null;
+  if(preview.objectUrl)setTimeout(()=>URL.revokeObjectURL(preview.url),1500);
+  closeModal();
+}
+function cancelPaymentImagePreview(){clearPaymentImagePreview();closeModal();}
+
 async function exportPaymentImage(gid,scope='all',selectedNicks=null){
-  const g=getG(gid);if(!g||g.type!=='box')return;
+  const g=getG(gid);if(!g||!['box','basic'].includes(g.type))return;
   const data=buildPaymentImageData(g,scope,selectedNicks);
   if(!data.bps.length){alert('尚無商品');return;}
   if(!data.sections.length){alert('目前沒有可匯出的資料');return;}
@@ -3856,7 +3939,7 @@ async function exportPaymentImage(gid,scope='all',selectedNicks=null){
   const canvas=document.createElement('canvas'),ctx=canvas.getContext('2d');
   const font='15px "Microsoft JhengHei","PingFang TC",sans-serif';
   ctx.font=font;
-  const headers=['暱稱',...data.bps.map(p=>p.name),'總金額'];
+  const headers=['暱稱',...data.bps.map(p=>p.name),data.amountLabel];
   const allRows=data.sections.flatMap(s=>s.rows);
   const rawColumns=headers.map((header,i)=>[header,...allRows.map(row=>i===0?row.nick:i===headers.length-1?'$'+row.total.toLocaleString():row.products[i-1])]);
   const widths=rawColumns.map((values,i)=>{
@@ -3880,7 +3963,7 @@ async function exportPaymentImage(gid,scope='all',selectedNicks=null){
   const colors={bg:'#fffafb',title:'#684f59',head:'#d8a7b7',headText:'#fffdfd',section:'#f2dfe6',row:'#fffdfd',alt:'#fcf4f7',grid:'#ead5dd',text:'#5d4850'};
   ctx.fillStyle=colors.bg;ctx.fillRect(0,0,logicalWidth,logicalHeight);
   ctx.fillStyle=colors.title;ctx.font='bold 24px "Microsoft JhengHei","PingFang TC",sans-serif';ctx.textAlign='left';ctx.textBaseline='middle';
-  ctx.fillText(`${g.name} — 收款${data.title}`,margin,margin+25);
+  ctx.fillText(g.name,margin,margin+25);
   let y=margin+titleHeight,x=margin;
   ctx.font='bold 15px "Microsoft JhengHei","PingFang TC",sans-serif';
   for(let i=0;i<headers.length;i++){
@@ -3907,10 +3990,9 @@ async function exportPaymentImage(gid,scope='all',selectedNicks=null){
       y+=row.height;rowIndex++;
     }
   }
-  const fileName=String(`${g.name}_收款${data.title}`).replace(/[\\/:*?"<>|]/g,'_')+'.png';
-  const save=blob=>{const url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=fileName;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);};
-  if(canvas.toBlob)canvas.toBlob(blob=>blob?save(blob):alert('圖片匯出失敗'),'image/png');
-  else{const a=document.createElement('a');a.href=canvas.toDataURL('image/png');a.download=fileName;a.click();}
+  const fileName=String(scope==='unpaid'?`${g.name}_未匯款名單`:`${g.name}_收款${data.title}`).replace(/[\\/:*?"<>|]/g,'_')+'.png';
+  if(canvas.toBlob)canvas.toBlob(blob=>blob?showPaymentImagePreview(blob,fileName,true,logicalWidth):alert('圖片匯出失敗'),'image/png');
+  else showPaymentImagePreview(canvas.toDataURL('image/png'),fileName,false,logicalWidth);
 }
 
 
@@ -4112,8 +4194,8 @@ function refreshMultiCancelFixedControls(){
 function showSingleOrderModal(id){
   const g=getG(id);_mGid=id;_mRowId=0;
   const isBox=g.type==='box',liftLocked=usesLegacyClosedRules(g);
-  const nicks=[...new Set([...(isBox?Object.keys(getTeam()):[]),...g.orders.map(o=>o.nick)])];
-  const bps=(g.boxProducts||[]);
+  const nicks=g.type==='basic'?Object.keys(getTeam()):[...new Set([...(isBox?Object.keys(getTeam()):[]),...g.orders.map(o=>o.nick)])];
+  const bps=(g.boxProducts||[]).filter(p=>g.type!=='basic'||p.kind==='single');
   const st=S();
 
   _mShots=[];
@@ -4156,7 +4238,7 @@ function addOrderRow(){
   const g=getG(_mGid);if(!g)return;
   const isBox=g.type==='box';
   const isBasic=g.type==='basic';
-  const bps=(g.boxProducts||[]);
+  const bps=(g.boxProducts||[]).filter(p=>!isBasic||p.kind==='single');
   const allItems=[...new Set([...g.orders.map(o=>o.item),...(g.items||[]).map(i=>i.name),...bps.flatMap(p=>p.contents)])];
   const st=S();
   const r=_mRowId++;
@@ -4164,12 +4246,12 @@ function addOrderRow(){
   div.className='form-row';
   div.style.alignItems='flex-end';
   div.id='mOR_'+r;
-  const hasBps=isBox&&bps.length>0;
+  const hasBps=(isBox||isBasic)&&bps.length>0;
   let itemField;
   if(hasBps){
     itemField=`
     <div class="form-group" style="flex:1 1 170px;min-width:150px"><label>商品</label>
-      <select class="moBp" style="width:100%"><option value="">— 選擇商品 —</option>${bps.map(p=>`<option value="${p.id}" ${p.kind==='single'?'style="color:#0b7285;font-weight:bold"':''}>${esc(p.name)}${p.kind==='single'?'（單領）':p.kind==='blind'?'（全盲抽）':''}</option>`).join('')}</select></div>
+      <select class="moBp" style="width:100%"><option value="">— 選擇商品 —</option>${bps.map(p=>`<option value="${p.id}" ${p.kind==='single'?'style="color:#0b7285;font-weight:bold"':''}>${esc(p.name)}${isBasic?'':p.kind==='single'?'（單領）':p.kind==='blind'?'（全盲抽）':''}</option>`).join('')}</select></div>
     <div class="form-group" style="flex:1 1 170px;min-width:150px"><label>款式</label>
       <select class="moI" style="width:100%" disabled><option value="">— 先選商品 —</option></select></div>`;
   } else {
@@ -4182,10 +4264,10 @@ function addOrderRow(){
   div.style.gap='8px';
   div.innerHTML=`
     ${itemField}
-    <div class="form-group" style="flex:0 0 ${hasBps?'92':'52'}px"><label>${esc(st.fieldQty)}</label>
+    <div class="form-group" style="flex:0 0 ${isBox&&hasBps?'92':'52'}px"><label>${esc(st.fieldQty)}</label>
       <div style="display:flex;gap:2px;align-items:center">
         <input class="moQ" type="number" min="1" value="1" style="width:48px">
-        ${hasBps?`<button class="bs moAll" type="button" title="自動承接此款式之後新增的每一配" style="padding:4px 6px;font-size:11px;white-space:nowrap">all</button>`:''}
+        ${isBox&&hasBps?`<button class="bs moAll" type="button" title="自動承接此款式之後新增的每一配" style="padding:4px 6px;font-size:11px;white-space:nowrap">all</button>`:''}
       </div></div>
     ${isBasic?`<div class="form-group" style="flex:0 0 70px"><label>${esc(st.fieldPrice)}</label><input class="moP" type="number" min="0" placeholder="選填" style="width:70px"></div>`
       :`<div class="form-group" style="flex:0 0 56px"><label>${esc(st.fieldPrice)}</label><span class="moPrice muted" style="display:block;padding:6px 0">—</span></div>`}
@@ -4214,10 +4296,14 @@ function addOrderRow(){
     allBtn._setAll=setAll;
   }
   const updatePrice=()=>{
-    if(isBasic)return;
     const name=(itemEl.value||'').trim();
     const bpId=bpEl?parseInt(bpEl.value)||null:null;
     const p=lookupPrice(g,name,bpId);
+    if(isBasic){
+      const input=div.querySelector('.moP');
+      if(input&&hasBps)input.value=p!=null?p:'';
+      return;
+    }
     const span=div.querySelector('.moPrice');
     if(span) span.textContent=p!=null?'$'+p:'—';
   };
@@ -4236,7 +4322,7 @@ function addOrderRow(){
       refreshMultiCancelFixedControls();
     });
   }
-  if(itemEl && !isBasic){
+  if(itemEl){
     itemEl.addEventListener('input',()=>{updatePrice();refreshMultiCancelFixedControls();});
     itemEl.addEventListener('change',()=>{updatePrice();refreshMultiCancelFixedControls();});
   }
@@ -4347,11 +4433,14 @@ function showEditOrderModal(gid,oid){
   const liftLocked=usesLegacyClosedRules(g);
   const product=o.bpId?(g.boxProducts||[]).find(p=>p.id===o.bpId):(g.boxProducts||[]).find(p=>p.contents.includes(o.item));
   const canAll=g.type==='box'&&product&&product.kind!=='single';
+  const itemField=g.type==='basic'&&product?.kind==='single'
+    ?`<select id="eOI">${product.contents.map(item=>`<option value="${esc(item)}" ${item===o.item?'selected':''}>${esc(item)}</option>`).join('')}</select>`
+    :`<input id="eOI" value="${esc(o.item)}">`;
   const st=S();
   openModal(`<h3>編輯喊單</h3>
     <div class="form-row">
       <div class="form-group"><label>${esc(st.fieldNick)}</label><input id="eON" value="${esc(o.nick)}"></div>
-      <div class="form-group"><label>${esc(st.fieldItem)}</label><input id="eOI" value="${esc(o.item)}"></div></div>
+      <div class="form-group"><label>${esc(st.fieldItem)}</label>${itemField}</div></div>
     <div class="form-row">
       <div class="form-group"><label>${esc(st.fieldQty)}</label><input id="eOQ" type="number" min="1" value="${o.qty||1}" ${o.all?'disabled':''}>${canAll?`<label style="display:inline-flex;align-items:center;gap:4px;font-size:12px;margin-top:5px"><input type="checkbox" id="eOAll" ${o.all?'checked':''} onchange="document.getElementById('eOQ').disabled=this.checked">已 all</label>`:''}</div>
       <div class="form-group"><label>${esc(st.fieldPrice)}</label><input id="eOP" type="number" min="0" value="${o.price||''}"></div>
@@ -4725,16 +4814,17 @@ function copyExistingBoxProduct(gid){
   closeModal();render();
 }
 function showAddBoxProductModal(gid,defaultKind){
-  const isSingle=defaultKind==='single';
+  const basicOnly=getG(gid)?.type==='basic';
+  const isSingle=basicOnly||defaultKind==='single';
   const isBlind=defaultKind==='blind';
   _bpImg=null;
   openModal(`<h3>新增商品</h3>
-    <div class="form-group" style="margin:10px 0"><label>商品類型</label>
+    ${basicOnly?'':`<div class="form-group" style="margin:10px 0"><label>商品類型</label>
       <div style="display:flex;gap:16px;margin-top:4px">
         <label style="display:flex;align-items:center;gap:4px;cursor:pointer"><input type="radio" name="bpKind" value="box" ${!isSingle&&!isBlind?'checked':''} onchange="toggleBpKind()">拆盒</label>
         <label style="display:flex;align-items:center;gap:4px;cursor:pointer"><input type="radio" name="bpKind" value="blind" ${isBlind?'checked':''} onchange="toggleBpKind()">全盲抽</label>
         <label style="display:flex;align-items:center;gap:4px;cursor:pointer"><input type="radio" name="bpKind" value="single" ${isSingle?'checked':''} onchange="toggleBpKind()">單領</label>
-      </div></div>
+      </div></div>`}
     <div class="form-group" style="margin:10px 0"><label>商品名稱</label><input id="bpN" placeholder="例：第一彈徽章"></div>
     ${bpImgField('')}
     <div class="form-group" style="margin:10px 0"><label>款式（每行一款，或用 / 分隔）</label>
@@ -4774,13 +4864,13 @@ function addBoxProduct(gid){
   const name=$('#bpN').value.trim();if(!name){alert('請輸入名稱');return;}
   const raw=$('#bpC').value.trim();
   let contents=raw.split(/[\n\/,，]/).map(s=>s.trim()).filter(Boolean);
-  const kind=document.querySelector('input[name=bpKind]:checked')?.value||'box';
+  const kind=getG(gid)?.type==='basic'?'single':document.querySelector('input[name=bpKind]:checked')?.value||'box';
   const img=_bpImg||'';
   const surcharge=parseFloat($('#bpSur')?.value)||0;
   if(kind==='single'){
     if(!contents.length)contents=[name];
     const unitPrice=parseFloat($('#bpUnit')?.value)||0;
-    upG(gid,g=>{if(!g.boxProducts)g.boxProducts=[];
+    upG(gid,g=>{if(!g.boxProducts)g.boxProducts=[];if(!g.nBid)g.nBid=Math.max(0,...g.boxProducts.map(p=>Number(p.id)||0))+1;
       g.boxProducts.push({id:g.nBid++,name,kind:'single',contents,unitPrice,maxBoxes:0,pricePerBox:0,priceMode:'average',adjustPrice:false,avgPrice:0,itemPrices:{},img,surcharge});});
     closeModal();render();return;
   }
@@ -4809,17 +4899,18 @@ function addBoxProduct(gid){
 }
 function showEditBoxProductModal(gid,bid){
   const g=getG(gid),p=(g.boxProducts||[]).find(b=>b.id===bid);if(!p)return;
+  const basicOnly=g.type==='basic';
   const priceMode=bpPriceMode(p);
   const isSingle=p.kind==='single';
   const isBlind=p.kind==='blind';
   _bpImg=null;
   openModal(`<h3>編輯商品</h3>
-    <div class="form-group" style="margin:10px 0"><label>商品類型</label>
+    ${basicOnly?'':`<div class="form-group" style="margin:10px 0"><label>商品類型</label>
       <div style="display:flex;gap:16px;margin-top:4px">
         <label style="display:flex;align-items:center;gap:4px;cursor:pointer"><input type="radio" name="bpKind" value="box" ${!isSingle&&!isBlind?'checked':''} onchange="toggleBpKind()">拆盒</label>
         <label style="display:flex;align-items:center;gap:4px;cursor:pointer"><input type="radio" name="bpKind" value="blind" ${isBlind?'checked':''} onchange="toggleBpKind()">全盲抽</label>
         <label style="display:flex;align-items:center;gap:4px;cursor:pointer"><input type="radio" name="bpKind" value="single" ${isSingle?'checked':''} onchange="toggleBpKind()">單領</label>
-      </div></div>
+      </div></div>`}
     <div class="form-group" style="margin:10px 0"><label>名稱</label><input id="bpN" value="${esc(p.name)}"></div>
     ${bpImgField(p.img||'')}
     ${isSingle?`<div class="form-group" style="margin:10px 0"><label>款式（每行一款）</label>
@@ -4908,7 +4999,7 @@ function saveBoxProductEdit(gid,bid){
   const oldContents=[...(original?.contents||[])];
   if(document.querySelector('.bpExistingContent'))syncEditBpContents();
   let contents=$('#bpC').value.trim().split(/[\n\/,，]/).map(s=>s.trim()).filter(Boolean);
-  const kind=document.querySelector('input[name=bpKind]:checked')?.value||'box';
+  const kind=getG(gid)?.type==='basic'?'single':document.querySelector('input[name=bpKind]:checked')?.value||'box';
   const surcharge=parseFloat($('#bpSur')?.value)||0;
   const blindOpened=kind==='blind'&&!!$('#bpBlindOpened')?.checked;
   const blindCounts=kind==='blind'?collectBlindCounts(contents):{};
@@ -5158,6 +5249,10 @@ function getBoxItemPrice(g,itemName){
 function lookupPrice(g,itemName,bpId){
   if(!itemName)return null;
   if(g.type==='carry'){const it=(g.items||[]).find(i=>i.name===itemName);if(it&&it.price)return it.price;}
+  if(g.type==='basic'){
+    if(bpId){const p=(g.boxProducts||[]).find(b=>b.id===bpId&&b.kind==='single');if(p)return p.unitPrice||null;}
+    for(const p of(g.boxProducts||[])){if(p.kind==='single'&&p.contents.includes(itemName)&&p.unitPrice)return p.unitPrice;}
+  }
   if(g.type==='box'){
     if(bpId){
       const p=(g.boxProducts||[]).find(b=>b.id===bpId);
@@ -5339,7 +5434,10 @@ function openOfficialUrl(urlEnc){
 }
 document.addEventListener('keydown',e=>{if(e.key==='Escape'){const ov=document.getElementById('imgLightbox');if(ov)ov.style.display='none';}});
 
-function openModal(html){$('#modalContent').innerHTML=html;$('#modalBg').classList.add('show');}
+function openModal(html,maxWidth=''){
+  const modal=$('#modalContent');
+  modal.innerHTML=html;modal.style.maxWidth=maxWidth;$('#modalBg').classList.add('show');
+}
 function closeModal(){$('#modalBg').classList.remove('show');}
 document.addEventListener('keydown',e=>{if(e.key==='Escape')closeModal();});
 function esc(s){const d=document.createElement('div');d.textContent=s;return d.innerHTML;}
