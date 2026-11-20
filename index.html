@@ -581,7 +581,7 @@ function upG(id,fn){
 let view='home',gid=null,tab='orders',sNick='',sItem='',homeFilter='';
 const _liftAlignmentChecked=new Set();
 function goHome(){view='home';gid=null;render();}
-function goGroup(id){view='group';gid=id;tab='orders';sNick='';sItem='';render();}
+function goGroup(id){const g=getG(id);view='group';gid=id;tab=g?.type==='box'?'boxSetup':'orders';sNick='';sItem='';render();}
 let _renderContext='';
 function render(){
   const context=view+'|'+(gid??'')+'|'+tab,sameContext=context===_renderContext;
@@ -712,8 +712,8 @@ function renderGroup(){
     </div>`;
 
   const tabDefs=[
-    {key:'orders',label:'喊單列表',show:true},
     {key:'boxSetup',label:'拆團狀況',show:g.type==='box'},
+    {key:'orders',label:'喊單列表',show:true},
     {key:'single',label:g.type==='basic'?(RO?'商品':'商品管理'):'單領',show:g.type==='box'||g.type==='basic'},
     {key:'items',label:'商品庫存',show:g.type==='carry'},
     {key:'priority',label:'帶多計算',show:g.type==='carry'},
@@ -723,7 +723,7 @@ function renderGroup(){
     {key:'export',label:'匯出',show:!RO},
   ];
   const vis=tabDefs.filter(t=>t.show);
-  if(!vis.find(t=>t.key===tab))tab='orders';
+  if(!vis.find(t=>t.key===tab))tab=vis[0]?.key||'orders';
   h+=`<div class="tabs">${vis.map(t=>`<button class="tab ${tab===t.key?'active':''}" onclick="tab='${t.key}';render()">${t.label}</button>`).join('')}</div>`;
 
   const renderers={orders:renderOrdersTab,boxSetup:renderBoxSetupTab,single:renderSingleTab,items:renderItemsTab,priority:renderPriorityTab,buyers:renderBuyersTab,pay:renderPayTab,groupSettings:renderGroupSettingsTab,export:renderExportTab};
@@ -836,7 +836,7 @@ function renderOrdersTab(g){
 
 let _bpOpen={};
 function toggleBpDetail(pid){_bpOpen[pid]=!_bpOpen[pid];render();}
-let _spNick='',_spGid='',_spHide=false;
+let _spNick='',_spNickQuery='',_spGid='',_spHide=false,_spShowArrived=true,_spShowUnarrived=true,_spScrollTop=0;
 function memberGroupAllShipped(list,ship,nick){
   return list.length>0&&list.every(o=>{
     const key=`${o.bpId||''}|||${o.item}|||${o.bind?1:0}|||${nick}`;
@@ -844,6 +844,25 @@ function memberGroupAllShipped(list,ship,nick){
   });
 }
 function isShipQueryGroup(g){return ['已收完定金','已完成收款','已到貨','已結團'].includes(g.status);}
+function shipNickMatches(query,nicks=Object.keys(getTeam()).sort()){
+  const q=String(query||'').trim().toLocaleLowerCase();
+  return q?nicks.filter(n=>String(n).toLocaleLowerCase().includes(q)):[];
+}
+function shipNickSuggestionHtml(query,nicks=Object.keys(getTeam()).sort()){
+  const matches=shipNickMatches(query,nicks);
+  if(!String(query||'').trim())return '';
+  if(!matches.length)return '<div class="muted" style="padding:7px 9px;font-size:12px">找不到符合的團員</div>';
+  return matches.map(n=>`<button type="button" style="display:block;width:100%;text-align:left;border:0;border-bottom:1px solid var(--line);border-radius:0;background:#fff;padding:7px 9px" onclick="selectShipNick(decodeURIComponent('${encodeURIComponent(n)}'))">${esc(n)}</button>`).join('');
+}
+function filterShipNickSuggestions(value){
+  _spNickQuery=value;
+  const box=document.getElementById('shipNickSuggestions');if(!box)return;
+  box.innerHTML=shipNickSuggestionHtml(value);
+  box.style.display=String(value||'').trim()?'block':'none';
+}
+function selectShipNick(nick){
+  _spNick=nick;_spNickQuery='';_spGid='';_spScrollTop=0;showShipModal();
+}
 function showShipModal(){
   const db=loadDB();
   const team=getTeam();
@@ -868,9 +887,13 @@ function showShipModal(){
         const bp=(g.boxProducts||[]).find(p=>orderMatches(p,o)&&p.contents.includes(o.item));
         const label=bpItemLabel(bp,o.item)+(o.bind?'（綁）':'');
         const arrived=effArrived(g,fullKey);
-        const arrCell=groupArrived&&!RO
-          ?`<span class="badge ${arrived?'b-green':'b-red'}" style="cursor:pointer" title="點擊標記缺件/到貨" onclick="toggleShip(${g.id},'${encodeURIComponent(fullKey)}','na')">${arrived?'已到貨':'缺件'}</span>`
-          :`<span class="badge ${arrived?'b-green':(groupArrived&&st.na)?'b-red':'b-amber'}">${arrived?'已到貨':(groupArrived&&st.na)?'缺件':'未到貨'}</span>`;
+        if((arrived&&!_spShowArrived)||(!arrived&&!_spShowUnarrived))continue;
+        const arrCell=RO
+          ?`<span class="badge ${arrived?'b-green':'b-amber'}">${arrived?'已到貨':'未到貨'}</span>`
+          :`<select class="ship-status-select ${arrived?'ship-status-sent':'ship-status-pending'}" aria-label="${esc(label)}到貨狀態" onchange="setArrivalStatus(${g.id},'${encodeURIComponent(fullKey)}',this.value,true)">
+              <option value="0" ${arrived?'':'selected'}>未到貨</option>
+              <option value="1" ${arrived?'selected':''}>已到貨</option>
+            </select>`;
         const shipCell=RO
           ?`<span class="badge ${st.s?'b-green':'b-gray'}">${st.s?'已出貨':'未出貨'}</span>`
           :`<select class="ship-status-select ${st.s?'ship-status-sent':'ship-status-pending'}" aria-label="${esc(label)}出貨狀態" onchange="setShipStatus(${g.id},'${encodeURIComponent(fullKey)}',this.value)">
@@ -904,26 +927,78 @@ function showShipModal(){
     :[];
   openModal(`<h3>個人貨況查詢</h3>
     <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px;align-items:center">
-      <select onchange="_spNick=this.value;_spGid='';showShipModal()"><option value="">固團成員</option>${nicks.map(n=>`<option value="${esc(n)}" ${_spNick===n?'selected':''}>${esc(n)}</option>`).join('')}</select>
-      <select onchange="_spGid=this.value;showShipModal()"><option value="">顯示全部</option>${gidOptions.map(g=>`<option value="${g.id}" ${_spGid==g.id?'selected':''}>${esc(g.name)}</option>`).join('')}</select>
+      <div style="position:relative;flex:1 1 170px;min-width:150px;max-width:240px">
+        <input id="shipNickSearch" type="search" value="${esc(_spNickQuery)}" placeholder="搜尋團員暱稱" autocomplete="off" oninput="filterShipNickSuggestions(this.value)" onfocus="filterShipNickSuggestions(this.value)" style="width:100%">
+        <div id="shipNickSuggestions" style="display:${_spNickQuery.trim()?'block':'none'};position:absolute;left:0;right:0;top:calc(100% + 3px);z-index:20;max-height:210px;overflow-y:auto;background:#fff;border:1px solid var(--line);border-radius:6px;box-shadow:0 5px 16px rgba(80,45,60,.14)">${shipNickSuggestionHtml(_spNickQuery,nicks)}</div>
+      </div>
+      <select onchange="_spNick=this.value;_spNickQuery='';_spGid='';_spScrollTop=0;showShipModal()"><option value="">固團成員</option>${nicks.map(n=>`<option value="${esc(n)}" ${_spNick===n?'selected':''}>${esc(n)}</option>`).join('')}</select>
+      <select onchange="_spGid=this.value;_spScrollTop=0;showShipModal()"><option value="">顯示全部</option>${gidOptions.map(g=>`<option value="${g.id}" ${_spGid==g.id?'selected':''}>${esc(g.name)}</option>`).join('')}</select>
       <label style="display:inline-flex;align-items:center;gap:4px;font-size:13px;cursor:pointer;white-space:nowrap">
-        <input type="checkbox" ${_spHide?'checked':''} onchange="_spHide=this.checked;showShipModal()">隱藏已出貨</label>
+        <input type="checkbox" ${_spShowArrived?'checked':''} onchange="_spShowArrived=this.checked;_spScrollTop=0;showShipModal()">已到貨</label>
+      <label style="display:inline-flex;align-items:center;gap:4px;font-size:13px;cursor:pointer;white-space:nowrap">
+        <input type="checkbox" ${_spShowUnarrived?'checked':''} onchange="_spShowUnarrived=this.checked;_spScrollTop=0;showShipModal()">未到貨</label>
+      <label style="display:inline-flex;align-items:center;gap:4px;font-size:13px;cursor:pointer;white-space:nowrap">
+        <input type="checkbox" ${_spHide?'checked':''} onchange="_spHide=this.checked;_spScrollTop=0;showShipModal()">隱藏已出貨</label>
     </div>
-    <div style="max-height:60vh;overflow-y:auto">${rowsHtml}</div>
+    <div id="shipResultScroll" style="max-height:60vh;overflow-y:auto">${rowsHtml}</div>
     <div class="btn-row" style="margin-top:10px"><button onclick="closeModal()">關閉</button></div>`);
+  const scroll=document.getElementById('shipResultScroll');if(scroll)scroll.scrollTop=_spScrollTop;
 }
 function effArrived(g,key){
-  if(!['已到貨','已結團'].includes(g.status))return false;
-  return !(((g.ship||{})[key]||{}).na);
+  const st=(g.ship||{})[key]||{};
+  if(Object.prototype.hasOwnProperty.call(st,'a'))return !!st.a;
+  const productId=String(key||'').split('|||')[0];
+  if(productId&&Object.prototype.hasOwnProperty.call(g.productArrival||{},productId))return !!g.productArrival[productId];
+  const groupArrived=['已到貨','已結團'].includes(g.status);
+  if(Object.prototype.hasOwnProperty.call(st,'na'))return groupArrived&&!st.na;
+  return groupArrived;
+}
+function productArrived(g,productId){
+  const key=String(productId);
+  if(Object.prototype.hasOwnProperty.call(g.productArrival||{},key))return !!g.productArrival[key];
+  return ['已到貨','已結團'].includes(g.status);
+}
+function productArrivalSelect(g,p){
+  const arrived=productArrived(g,p.id);
+  if(RO)return `<span class="badge ${arrived?'b-green':'b-amber'}">${arrived?'已到貨':'未到貨'}</span>`;
+  return `<select class="ship-status-select ${arrived?'ship-status-sent':'ship-status-pending'}" aria-label="${esc(p.name)}到貨狀態" onchange="setProductArrivalStatus(${g.id},${p.id},this.value)">
+    <option value="0" ${arrived?'':'selected'}>未到貨</option>
+    <option value="1" ${arrived?'selected':''}>已到貨</option>
+  </select>`;
+}
+function setProductArrivalStatus(gid,productId,value){
+  if(RO)return;
+  const arrived=value==='1',prefix=`${productId}|||`;
+  upG(gid,g=>{
+    if(!g.productArrival)g.productArrival={};
+    g.productArrival[String(productId)]=arrived?1:0;
+    for(const[key,st]of Object.entries(g.ship||{}))if(key.startsWith(prefix)){
+      delete st.a;delete st.na;
+    }
+  });
+  render();
+}
+function setArrivalStatus(gid,keyEnc,value,returnToShipQuery){
+  if(RO)return;
+  const key=decodeURIComponent(keyEnc),arrived=value==='1';
+  if(returnToShipQuery)_spScrollTop=document.getElementById('shipResultScroll')?.scrollTop||0;
+  upG(gid,g=>{
+    if(!g.ship)g.ship={};
+    const st=g.ship[key]||{};
+    st.a=arrived?1:0;delete st.na;g.ship[key]=st;
+  });
+  if(returnToShipQuery)showShipModal();else render();
 }
 function toggleShip(gid,keyEnc,field){
   const key=decodeURIComponent(keyEnc);
+  _spScrollTop=document.getElementById('shipResultScroll')?.scrollTop||0;
   upG(gid,g=>{if(!g.ship)g.ship={};const st=g.ship[key]||{};st[field]=st[field]?0:1;g.ship[key]=st;});
   showShipModal();
 }
 function setShipStatus(gid,keyEnc,value){
   if(RO)return;
   const key=decodeURIComponent(keyEnc),shipped=value==='1';
+  _spScrollTop=document.getElementById('shipResultScroll')?.scrollTop||0;
   upG(gid,g=>{if(!g.ship)g.ship={};const st=g.ship[key]||{};st.s=shipped?1:0;g.ship[key]=st;});
   showShipModal();
 }
@@ -1912,8 +1987,8 @@ function renderBoxSetupTab(g){
       const fullAllNoLimit=!p.maxBoxes&&info.onlyAll&&!(p.kind==='blind'&&p.blindOpened)&&p.contents.length>0&&p.contents.every(c=>(info.buyerMap[c]||[]).some(row=>row.all));
       let statLine;
       if(p.kind==='blind'&&p.blindOpened){
-        const actualQty=getBlindProductConfirmedOrders(g,p).reduce((sum,o)=>sum+o.qty,0);
-        statLine=`<span class="badge b-amber">全盲抽・已拆配</span><span>實際成立 <strong>${actualQty}</strong> 件</span>`;
+        const actualQty=blindOpenedTotal(p);
+        statLine=`<span class="badge b-amber">全盲抽・已拆配</span><span>實際拆 <strong>${actualQty}</strong> 顆</span>`;
       }else statLine=`<span>${p.kind==='blind'?'<span class="badge b-amber">全盲抽・未拆配</span> ':''}已成 <strong>${info.complete+(info.bindComplete||0)}</strong> 配</span>`;
       const nextBox=p.kind==='blind'&&p.blindOpened?null:info.boxes.find(b=>b.some(s=>!s.buyer));
       if(nextBox){
@@ -1926,7 +2001,8 @@ function renderBoxSetupTab(g){
         <div class="box-product-header" style="cursor:pointer" onclick="toggleBpDetail(${p.id})">
           <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap"><span class="twisty ${open?'open':''}" aria-hidden="true"></span>${p.img?`<img src="${p.img}" style="width:28px;height:28px;object-fit:cover;border-radius:4px;cursor:zoom-in" onclick="event.stopPropagation();showImg(this.src)">`:''}<strong style="${fullAllNoLimit?'color:#a32d2d':''}">${esc(p.name)}${fullAllNoLimit?' !':''}</strong>
             <span style="margin-left:6px;font-size:12px;display:inline-flex;gap:10px;flex-wrap:wrap">${statLine}</span></div>
-          <div style="display:flex;gap:4px" onclick="event.stopPropagation()">
+          <div style="display:flex;gap:4px;align-items:center;flex-wrap:wrap" onclick="event.stopPropagation()">
+            ${productArrivalSelect(g,p)}
             <button class="bs bg" onclick="showEditBoxProductModal(${g.id},${p.id})">編輯</button>
             <button class="bs bg" style="color:#a32d2d" onclick="delBoxProduct(${g.id},${p.id})">刪除</button></div>
         </div>`;
@@ -1954,9 +2030,12 @@ function renderSingleTab(g){
         <div class="box-product-header">
           <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">${p.img?`<img src="${p.img}" style="width:28px;height:28px;object-fit:cover;border-radius:4px;cursor:zoom-in" onclick="showImg(this.src)">`:''}<strong>${esc(p.name)}</strong>
             <span class="muted" style="margin-left:6px">${shownContents.length} 款${p.unitPrice?' · $'+p.unitPrice+'/個':''} · 已喊 ${totalQty} 個</span></div>
-          ${RO?'':`<div style="display:flex;gap:4px">
+          <div style="display:flex;gap:4px;align-items:center;flex-wrap:wrap">
+            ${productArrivalSelect(g,p)}
+          ${RO?'':`
             <button class="bs bg" onclick="showEditBoxProductModal(${g.id},${p.id})">編輯</button>
-            <button class="bs bg" style="color:#a32d2d" onclick="delBoxProduct(${g.id},${p.id})">刪除</button></div>`}
+            <button class="bs bg" style="color:#a32d2d" onclick="delBoxProduct(${g.id},${p.id})">刪除</button>`}
+          </div>
         </div>
         <div style="overflow-x:auto"><table><thead><tr><th>款式</th><th>單價</th><th>已喊</th><th>喊單者</th><th>缺貨</th></tr></thead><tbody>`;
       for(const c of shownContents){
@@ -1974,6 +2053,17 @@ function renderSingleTab(g){
 }
 
 function bpPriceMode(p){return p.priceMode||(p.adjustPrice?'adjust':'average');}
+function blindOpenedTotal(p){return (p.contents||[]).reduce((sum,item)=>sum+Math.max(0,parseInt((p.blindCounts||{})[item])||0),0);}
+function blindResultDisplayBox(p,sourceBox,actualByCell,row){
+  const box=(p.contents||[]).map(item=>{
+    const actual=actualByCell.get(JSON.stringify([row,item]));
+    if(actual)return actual;
+    const source=(sourceBox||[]).find(slot=>slot.item===item);
+    return source?.buyer&&!source.buyer.all?source:{item,buyer:null};
+  });
+  box.status=(p.contents||[]).every(item=>actualByCell.has(JSON.stringify([row,item])))?'成團':'爆配';
+  return box;
+}
 function bpHasItemPrices(p){return bpPriceMode(p)!=='average'&&p.itemPrices;}
 function bpFinalItemPrice(p,item){return bpHasItemPrices(p)&&p.itemPrices[item]!=null?p.itemPrices[item]:(p.avgPrice||null);}
 function productItemStateKey(productId,item){return `${productId}|||${item}`;}
@@ -2092,6 +2182,8 @@ function bpDetailHtml(g,p){
   const info=calcBoxes(g,p);
   const blindResult=p.kind==='blind'&&p.blindOpened;
   const blindActualSlots=blindResult?resolveBlindProductSlots(g,p):[];
+  const blindDisplayInfo=blindResult?calcBoxes(g,{...p,maxBoxes:0}):info;
+  const blindActualByCell=new Map(blindActualSlots.map(slot=>[JSON.stringify([slot.boxIdx,slot.item]),slot]));
   const blindActualKeys=new Set(blindActualSlots.map(slot=>JSON.stringify([slot.boxIdx,slot.item,slot.buyer.oid||0,!!slot.buyer.bind])));
   if(blindResult){
     const actual=aggregateProductSlots(g,p,blindActualSlots);
@@ -2145,7 +2237,12 @@ function bpDetailHtml(g,p){
     h+=`<div style="overflow-x:auto;margin-top:12px"><table><thead><tr><th></th>
       ${p.contents.map(c=>`<th>${esc(c)}${bind[c]?` <span class="badge b-purple" style="font-size:9px">綁${bind[c]} · 序${(p.bindOrder||{})[c]||0}</span>`:''}</th>`).join('')}<th>狀態</th><th></th></tr></thead><tbody>`;
     for(let i=0;i<showN;i++){
-      const box=info.boxes[i]||Object.assign(p.contents.map(item=>({item,buyer:null})),{status:'爆配',bindPlan:[]});
+      const sourceBox=blindDisplayInfo.boxes[i]||Object.assign(p.contents.map(item=>({item,buyer:null})),{status:'爆配',bindPlan:[]});
+      let box=sourceBox;
+      if(blindResult){
+        box=blindResultDisplayBox(p,sourceBox,blindActualByCell,i);
+        box.bindPlan=getBoxBindPlan(p,box);
+      }
       const priceChanged=Object.keys(p.rowPrices||{}).some(key=>key.startsWith(i+'|||'));
       h+=`<tr><td style="white-space:nowrap;font-weight:bold">第 ${i+1} 配${priceChanged?' *':''}</td>`;
       const bindPlan=box.bindPlan||getBoxBindPlan(p,box);
@@ -2678,8 +2775,7 @@ function boxOrderPriority(g,p,item,e,team,admins){
   const pos=member?member[item]:null;
   const adminMap=admins||(typeof getTeamAdmins==='function'?getTeamAdmins():{});
   const isAdmin=!!member&&!!adminMap[e.nick];
-  if(isAdmin)type='admin';
-  else if(pos){type=pos.t==='slot'&&e.cancelFixed?'pick':pos.t;rank=pos.r||0;}
+  if(pos){type=pos.t==='slot'&&e.cancelFixed?'pick':pos.t;rank=pos.r||0;}
   else if(e.fixed){
     const applies=e.fixedItems&&e.fixedItems.length?e.fixedItems.includes(item):true;
     if(applies){type=e.fixed==='slot'?'slot':'pick';rank=e.fixedRank||0;}
@@ -2687,9 +2783,10 @@ function boxOrderPriority(g,p,item,e,team,admins){
   }else if(member)type='member';
   const priorityState=productFixPriorityState(g,p,e);
   const fixedActive=priorityState.active;
+  if(isAdmin&&!(fixedActive&&type==='slot'))type='admin';
   let cls=3;
   if(e.bind)cls=5;
-  else if(type==='admin')cls=-1;
+  else if(type==='admin')cls=fixedActive?0.5:-1;
   else if(type==='slot')cls=fixedActive?0:1;
   else if(type==='pick')cls=1;
   else if(type==='member')cls=usesLegacyClosedRules(g)||e.memberPriority?2:3;
@@ -2752,7 +2849,8 @@ function calcBoxesLegacy(g,p){
   }
   const maxDemand=Math.max(0,...Object.values(demands));
   const minDemand=p.contents.length?Math.min(...p.contents.map(c=>demands[c]||0)):0;
-  let boxesNeeded=maxDemand;
+  const hasBoundedAll=!!p.maxBoxes&&p.contents.some(c=>(buyerMap[c]||[]).some(b=>b.all));
+  let boxesNeeded=hasBoundedAll?Math.max(0,parseInt(p.maxBoxes)||0):maxDemand;
   if(p.maxBoxes && boxesNeeded>p.maxBoxes) boxesNeeded=p.maxBoxes;
   const bind=p.bindItems||{};
   let surplus=0;
@@ -3017,9 +3115,10 @@ function calcBoxes(g,p){
   const maxDemand=Math.max(0,...Object.values(demands));
   const minDemand=p.contents.length?Math.min(...p.contents.map(c=>demands[c]||0)):0;
   const onlyAll=matchedOrderCount>0&&effectiveNonAllOrderCount===0;
-  const blindAllCount=p.kind==='blind'&&p.blindOpened?Math.max(0,...p.contents.map(c=>Math.max(0,parseInt((p.blindCounts||{})[c])||0))):0;
-  const allOnlyFallback=p.kind==='blind'&&p.blindOpened?blindAllCount:5;
-  let boxesNeeded=onlyAll?(Math.max(0,parseInt(p.maxBoxes)||0)||allOnlyFallback):maxDemand;
+  const blindAllNeeded=p.kind==='blind'&&p.blindOpened?Math.max(0,...p.contents.map(c=>allWinnerMap[c]?Math.max(0,parseInt((p.blindCounts||{})[c])||0):0)):0;
+  const allOnlyFallback=p.kind==='blind'&&p.blindOpened?blindAllNeeded:5;
+  const hasBoundedAll=!!p.maxBoxes&&p.contents.some(c=>(sortedMap[c]||[]).some(b=>b.all));
+  let boxesNeeded=hasBoundedAll?Math.max(0,parseInt(p.maxBoxes)||0):onlyAll?allOnlyFallback:Math.max(maxDemand,blindAllNeeded);
   if(p.maxBoxes && boxesNeeded>p.maxBoxes) boxesNeeded=p.maxBoxes;
   if(!p.maxBoxes){
     let extraRows=0;
@@ -3190,8 +3289,9 @@ function calcBoxes(g,p){
         if(!u||u.bind)return false;
         if((u.priorityEpoch||0)!==(pinnedPriority.epoch||0))return false;
         const candidateCls=u.priorityCls??3;
-        if(candidateCls<0)return candidateCls<pinnedPriority.cls;
-        return candidateCls===0&&(pinnedPriority.cls>0||((u.priorityRank||0)<(pinnedPriority.rank||0)));
+        if(candidateCls===0)return pinnedPriority.cls>0||(pinnedPriority.cls===0&&(u.priorityRank||0)<(pinnedPriority.rank||0));
+        if(u.isAdmin)return candidateCls<pinnedPriority.cls;
+        return false;
       });
       if(slotIdx>=0){
         const u=remaining[item].splice(slotIdx,1)[0];
@@ -3547,7 +3647,6 @@ function renderBuyersTab(g){
         <strong>${esc(nick)}</strong><span style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><span class="muted">${d.qty} 件 · $${d.amt.toLocaleString()}${d.sur>0?` · 二補 $${d.sur.toLocaleString()}`:''}</span>${blindAdjust[nick]>0?`<span class="badge b-amber">需補款 $${blindAdjust[nick].toLocaleString()}</span>`:blindAdjust[nick]<0?`<span class="badge b-green">需退款 $${Math.abs(blindAdjust[nick]).toLocaleString()}</span>`:Object.prototype.hasOwnProperty.call(blindAdjust,nick)?'<span class="badge b-gray">拆配差額 $0</span>':''}${RO?'':`<button class="bs bg" style="color:#a32d2d" onclick="hideBuyerStat(${g.id},'${encodeURIComponent(nick)}')">隱藏</button>`}</span></div>
       ${buyerLine}
       <div style="overflow-x:auto"><table><thead><tr><th>商品</th><th>${esc(st.fieldQty)}</th><th>${esc(st.fieldPrice)}</th><th>小計</th>${hasSur?'<th>二補</th>':''}<th>${esc(st.fieldNote)}</th><th>到貨狀況</th><th>出貨</th></tr></thead><tbody>`;
-    const groupArrived=['已到貨','已結團'].includes(g.status);
     for(const o of d.orders){
       const price=effPrice(g,o);
       const bp=(g.boxProducts||[]).find(p=>orderMatches(p,o)&&p.contents.includes(o.item));
@@ -3556,14 +3655,12 @@ function renderBuyersTab(g){
       const stt=(g.ship||{})[shipKey]||{};
       const shipped=!!stt.s;
       const arrived=effArrived(g,shipKey);
-      let arrCell;
-      if(!groupArrived){
-        arrCell='<span class="badge b-amber">未到貨</span>';
-      } else if(RO){
-        arrCell=`<span class="badge ${arrived?'b-green':'b-red'}">${arrived?'已到貨':'缺件'}</span>`;
-      } else {
-        arrCell=`<input type="checkbox" ${arrived?'checked':''} title="取消勾選＝該項缺件" onchange="toggleShipKey(${g.id},'${encodeURIComponent(shipKey)}','na')">${arrived?'':' <span class="badge b-red">缺件</span>'}`;
-      }
+      const arrCell=RO
+        ?`<span class="badge ${arrived?'b-green':'b-amber'}">${arrived?'已到貨':'未到貨'}</span>`
+        :`<select class="ship-status-select ${arrived?'ship-status-sent':'ship-status-pending'}" aria-label="${esc(label)}到貨狀態" onchange="setArrivalStatus(${g.id},'${encodeURIComponent(shipKey)}',this.value,false)">
+            <option value="0" ${arrived?'':'selected'}>未到貨</option>
+            <option value="1" ${arrived?'selected':''}>已到貨</option>
+          </select>`;
       const shipCell=RO
         ?`<span class="badge ${shipped?'b-green':'b-gray'}">${shipped?'已出貨':'未出貨'}</span>`
         :`<input type="checkbox" ${shipped?'checked':''} title="勾選＝已出貨" onchange="toggleShipKey(${g.id},'${encodeURIComponent(shipKey)}')">`;
@@ -3859,9 +3956,17 @@ function renderGroupSettingsTab(g){
     <div class="btn-row"><button class="bp" onclick="saveGroupSettings(${g.id})">儲存團內設定</button></div>
   </div>`;
 }
-// 記錄轉成「已到貨」的時間（囤貨期限起算點）；改回未到貨狀態則清除
-function markArrival(g,newStatus){
+function clearArrivalOverrides(g){
+  delete g.productArrival;
+  for(const st of Object.values(g.ship||{})){
+    delete st.a;delete st.na;
+  }
+}
+// 轉成整團已到貨時，先統一重置為已到貨；之後仍可逐項調整
+function markArrival(g,newStatus,oldStatus){
   const arrived=['已到貨','已結團'].includes(newStatus);
+  const wasArrived=['已到貨','已結團'].includes(oldStatus);
+  if(arrived&&!wasArrived)clearArrivalOverrides(g);
   if(arrived&&!g.arrivedAt)g.arrivedAt=Date.now();
   if(!arrived&&g.arrivedAt)delete g.arrivedAt;
 }
@@ -3870,8 +3975,9 @@ function saveGroupSettings(id){
     g.name=$('#gsName').value.trim()||g.name;
     g.type=$('#gsType').value;
     g.desc=$('#gsDesc').value.trim();
+    const oldStatus=g.status;
     g.status=$('#gsStatus').value;
-    markArrival(g,g.status);
+    markArrival(g,g.status,oldStatus);
     // 手動指定到貨日期優先（中午起算避免時區誤差）
     const av=$('#gsArrived')?.value;
     if(av)g.arrivedAt=new Date(av+'T12:00').getTime();
@@ -4567,9 +4673,10 @@ function showEditGroupModal(id){
 }
 function saveGroupEdit(id){
   upG(id,g=>{
+    const oldStatus=g.status;
     g.name=$('#mGN').value.trim()||g.name;g.type=$('#mGT').value;g.desc=$('#mGD').value.trim();g.status=$('#mGS').value;
     g.starGroup=$('#mGStar')?.checked||false;
-    markArrival(g,g.status);
+    markArrival(g,g.status,oldStatus);
     const dv=$('#mGDate').value;if(dv)g.createdAt=dv.replace(/-/g,'/');
     g.deadline=$('#mGDL').value||'';
     g.officialShip=$('#mGShip').value.trim();
@@ -5089,6 +5196,9 @@ function toggleBpKind(){
   const singleOnly=$('#bpSingleOnly');if(singleOnly)singleOnly.style.display=isSingle?'block':'none';
   const blindOnly=$('#bpBlindOnly');if(blindOnly)blindOnly.style.display=kind==='blind'?'block':'none';
   refreshBlindCountInputs();
+  const label=$('#priceInputLabel');
+  if(label&&currentBpPriceMode()==='adjust')label.textContent=kind==='blind'?'各款差額':'各款差額（合計需為 ±0）';
+  updatePriceSummary();
 }
 function refreshBindInputs(existing,existingOrder){
   const box=$('#bindInputs');if(!box)return;
@@ -5328,7 +5438,7 @@ function showAddBoxProductModal(gid,defaultKind){
     <div id="bpBoxOnly" style="display:${isSingle?'none':'block'}">
       <div class="form-row">
         <div class="form-group"><label>價格方式</label><select id="bpPriceMode" onchange="togglePriceSection()">
-          <option value="average">均價</option><option value="adjust">調價</option><option value="fixed">指定價格</option>
+          <option value="average">均價</option><option value="adjust" data-fixed-text>調價</option><option value="fixed">指定價格</option>
         </select></div>
         <div class="form-group" id="bpAvgGroup"><label>均價（每款基準價）</label><input id="bpAvg" type="number" min="0" placeholder="例：50" oninput="updatePriceSummary()"></div>
       </div>
@@ -5374,7 +5484,7 @@ function addBoxProduct(gid){
   const blindOpened=kind==='blind'&&!!$('#bpBlindOpened')?.checked;
   const blindCounts=kind==='blind'?collectBlindCounts(contents):{};
   const priceMode=currentBpPriceMode();
-  if(priceMode==='adjust'&&Math.abs(priceDiff())>=0.01){alert(`調價合計需為 ±0（目前 ${priceDiff()>0?'+':''}$${Math.round(priceDiff())}）`);return;}
+  if(kind!=='blind'&&priceMode==='adjust'&&Math.abs(priceDiff())>=0.01){alert(`調價合計需為 ±0（目前 ${priceDiff()>0?'+':''}$${Math.round(priceDiff())}）`);return;}
   const avgPrice=priceMode==='fixed'?0:(parseFloat($('#bpAvg')?.value)||0);
   const itemPrices={};
   if(priceMode!=='average'){
@@ -5415,7 +5525,7 @@ function showEditBoxProductModal(gid,bid){
       <div class="form-row">
         <div class="form-group"><label>價格方式</label><select id="bpPriceMode" onchange="togglePriceSection()">
           <option value="average" ${priceMode==='average'?'selected':''}>均價</option>
-          <option value="adjust" ${priceMode==='adjust'?'selected':''}>調價</option>
+          <option value="adjust" data-fixed-text ${priceMode==='adjust'?'selected':''}>調價</option>
           <option value="fixed" ${priceMode==='fixed'?'selected':''}>指定價格</option>
         </select></div>
         <div class="form-group" id="bpAvgGroup" style="display:${priceMode==='fixed'?'none':'block'}"><label>均價（每款基準價）</label><input id="bpAvg" type="number" min="0" value="${p.avgPrice||''}" oninput="updatePriceSummary()"></div>
@@ -5432,7 +5542,7 @@ function showEditBoxProductModal(gid,bid){
         <div id="blindCountInputs" class="form-row"></div>
       </div>
       <div id="priceSection" style="display:${priceMode==='average'?'none':'block'}">
-        <div class="form-group"><label id="priceInputLabel">各款價格</label><div id="priceInputs"></div></div>
+        <div class="form-group"><label id="priceInputLabel">${priceMode==='adjust'?(isBlind?'各款差額':'各款差額（合計需為 ±0）'):'各款價格'}</label><div id="priceInputs"></div></div>
         <div id="priceSummary" class="price-summary" style="display:none"></div>
       </div>
     </div>
@@ -5530,7 +5640,7 @@ function saveBoxProductEdit(gid,bid){
   }
   if(!contents.length){alert('至少一個款式');return;}
   const priceMode=currentBpPriceMode();
-  if(priceMode==='adjust'&&Math.abs(priceDiff())>=0.01){alert(`調價合計需為 ±0（目前 ${priceDiff()>0?'+':''}$${Math.round(priceDiff())}）`);return;}
+  if(kind!=='blind'&&priceMode==='adjust'&&Math.abs(priceDiff())>=0.01){alert(`調價合計需為 ±0（目前 ${priceDiff()>0?'+':''}$${Math.round(priceDiff())}）`);return;}
   const avgPrice=priceMode==='fixed'?0:(parseFloat($('#bpAvg')?.value)||0);
   const itemPrices={};
   if(priceMode!=='average'){
@@ -5708,7 +5818,8 @@ function togglePriceSection(){
   const avgGroup=$('#bpAvgGroup');if(avgGroup)avgGroup.style.display=mode==='fixed'?'none':'block';
   sec.style.display=mode==='average'?'none':'block';
   const label=$('#priceInputLabel');
-  if(label)label.textContent=mode==='adjust'?'各款差額（合計需為 ±0）':'各款價格';
+  const blind=document.querySelector('input[name=bpKind]:checked')?.value==='blind';
+  if(label)label.textContent=mode==='adjust'?(blind?'各款差額':'各款差額（合計需為 ±0）'):'各款價格';
   const summary=$('#priceSummary');if(summary&&mode!=='adjust')summary.style.display='none';
   if(mode!=='average'){
     const container=$('#priceInputs');if(container)container.innerHTML='';
@@ -5750,7 +5861,9 @@ function updatePriceSummary(){
   const contents=ta.value.trim().split(/[\n\/,，]/).map(s=>s.trim()).filter(Boolean);
   if(!contents.length){box.style.display='none';return;}
   const diff=priceDiff();
+  const blind=document.querySelector('input[name=bpKind]:checked')?.value==='blind';
   box.style.display='block';
+  if(blind){box.innerHTML=`<span>差額合計 ${diff>0?'+':''}$${Math.round(diff)}</span>`;return;}
   box.innerHTML=Math.abs(diff)<0.01?'<span style="color:#3b6d11">合計 ±0</span>':`<span style="color:#a32d2d">合計 ${diff>0?'+':''}$${Math.round(diff)}（需為 ±0 才能儲存）</span>`;
 }
 function getBoxItemPrice(g,itemName){
@@ -6063,6 +6176,7 @@ function applyTextOverrides(){
     const walker=document.createTreeWalker(root,NodeFilter.SHOW_TEXT);
     const nodes=[];while(walker.nextNode())nodes.push(walker.currentNode);
     for(const n of nodes){
+      if(n.parentElement?.hasAttribute('data-fixed-text'))continue;
       const s=n.nodeValue;if(!s||!s.trim())continue;
       const{tpl,nums}=normText(s);
       const ov=map[tpl];if(!ov||ov===tpl)continue;
